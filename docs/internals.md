@@ -1939,6 +1939,29 @@ runtime has prefilled a full chunk on the GPU alone, which must not be
 unavailable, and whose automatic context must be what the plan holds with the
 split it runs.
 
+### Neural Engine MoE split
+
+A sparse target's prefill can split its routed experts too
+(`runtime/ops/AneMoe.cpp`, `kernels/shared/ane_moe.metal`). Each block keeps
+`plan.experts` of its experts' int8 copies resident — the ones its route counts
+reach most, the counts a start reads from `ane::recall` under the split's
+calibration key (the blocks' formats, the Mac, macOS and the build) and adds
+its own marks to, so a server self-calibrates after its first request — and one
+program serves every block, its group `experts × capacity` packed rows, so that
+its evaluations report in order and one handoff's shared event orders each join
+against its own evaluation. A prefill command's application marks the
+residents' routes out of `selected` up to each expert's capacity (routes past
+it stay the GPU's), scales and packs their input rows into the ANE's int8
+surface, signals, and after the GPU's own expert passes waits and joins the
+ANE's rows into the expert outputs' region after the routes, which the plan
+sizes by `aneRows` (`MoeConfig`, `RuntimeArenas`). A command of more than one
+chunk does not split: a MoE target's prefill commands hold one, and a
+command's steps share the packed surfaces. The weights are requantized once at
+construction at a scale each group of 32 inputs (not a row): the graph
+multiplies each group's codes back before its matmul, which is what the
+requantization error halves to about 0.4%, and the input's per-row int8 is
+what the end-to-end difference from the GPU is made of.
+
 ## Host steps
 
 A command can run CPU work between its GPU work. A host step

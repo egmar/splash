@@ -121,3 +121,68 @@ conversations resume from are dropped instead of written.
 See [the low-bit GGUF measurements](https://github.com/incoai/splash/pull/160)
 for the workloads, memory pressure, SSD settings and limitations, and
 [the Bonsai measurements](https://github.com/incoai/splash/pull/166) for PQ2_0.
+
+## The Neural Engine's expert split
+
+A sparse MoE target can run prefill's routed experts on the Neural Engine
+beside the GPU (`ops::AneMoe`). Each block keeps its most-routed experts as
+int8 copies resident, and a prefill command's routes to them are marked out of
+the GPU's grouping, packed into the ANE's surfaces and joined back into the
+combine's rows; the GPU runs the rest of the block's routes. Decode is
+untouched, its steps' rows being far below the split's least chunks. It is a
+benchmark option today, not a serve option:
+
+```bash
+make benchmark-backend MODEL=unsloth/Inkling-2-Mini-GGUF:UD-IQ3_XXS \
+  BACKEND_ARGS="--scenario short --ane-moe-experts 8 --ane-moe-capacity 1024"
+```
+
+`--ane-moe-experts` is the experts each block keeps and `--ane-moe-capacity`
+the packed rows each holds; their product is the rows the join writes, at most
+8,192. Run each configuration twice and read the second run: the first after a
+build learns which experts the routes reach, keeps the counts under the
+build's calibration key, and only the next start plans the residents from
+them. A start says what it took on its log line, and `/status` reports it
+(`ane_moe`: state, copies, rows, blocks, join rows, bytes, commands,
+evaluations).
+
+Measured on an M4 Pro (16-core GPU, 24 GB), Inkling-2-Mini `UD-IQ3_XXS`, 8
+experts of 512 packed rows on all 24 blocks (1.5 GiB), prefill GPU
+milliseconds, medians of interleaved runs:
+
+| Prompt tokens | GPU alone | with the split | |
+| ---: | ---: | ---: | ---: |
+| 480 | 979 | 858 | 1.14× |
+| 640 | 1,283 | 998 | 1.29× |
+| 1,024 | 1,998 | 1,588 | 1.26× |
+| 1,536 | 3,003 | 2,561 | 1.17× |
+| 2,016 | 3,971 | 3,528 | 1.13× |
+
+Long prompts hold the gain: a 30,000-token prompt of this repository's
+documentation (teacher-forced, its windows cold) prefilled 37.2 s alone and
+32.4 s with the split at 17,400 tokens, 1.15×, and 67.8 s against 59.1 s at
+29,992. Capacity sets the point: 8 experts of 1,024 rows (8,192 join rows) is the fastest from about
+1,000 tokens up — 3,104 ms against 3,971 at 2,016 — and the slowest at 480
+(1,206 ms against 979), because the join's scale, pack, evaluation and copy
+run over every column whether the routes fill it or not. The copies also cost
+context: on a 24 GB Mac, 1.5 GiB of residents leaves no host memory for a 32K
+context beside them, and a larger Mac is where both fit.
+
+The quality the split costs, measured as the KL of its next-token distribution
+from the GPU's over identical ids: on 516 teacher-forced rows of that 30,000-token
+prompt, mean 5.6e-3 a row, median 2.6e-3, p99 4.9e-2, with the most likely
+token agreeing on 96% of them. A weight scale each group of 32 inputs halves
+the requantization error of one a row and changes the end-to-end KL not at all
+— the input's per-row int8 and the graph's fp16 arithmetic are what it is made
+of. To measure a window on your Mac:
+
+```bash
+build/engine-tests/teacher-logits build/splash.metallib MODEL_ROOT TOKENS OUTPUT --window 17400:128
+build/engine-tests/teacher-logits build/splash.metallib MODEL_ROOT TOKENS OUTPUT-ANE --window 17400:128 \
+  --ane-moe-experts 8 --ane-moe-capacity 1024
+.venv/bin/python -m dev.benchmarks.teacher_kl OUTPUT-17400.f32 OUTPUT-ANE-17400.f32
+```
+
+`TOKENS` is the prompt's little-endian uint32 ids from the model's
+`tokenizer/tokenizer.json`; `MODEL_ROOT` is the model directory (`make -n
+benchmark-backend MODEL=... | tail -1` prints it).
