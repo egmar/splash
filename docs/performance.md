@@ -147,7 +147,18 @@ build learns which experts the routes reach, keeps the counts under the
 build's calibration key, and only the next start plans the residents from
 them. A start says what it took on its log line, and `/status` reports it
 (`ane_moe`: state, copies, rows, blocks, join rows, bytes, commands,
-evaluations).
+evaluations, routes), as does a run's last line: `Neural Engine MoE split: 40
+commands, 672 evaluations, 1914573 of 4504704 routes (42.5%)` — on this Mac an
+uncalibrated start takes 4.4% of the routes and the next one 42.5%, which is
+the difference the speedup is made of.
+
+One command runs both sides and prints the comparison:
+`make benchmark-ane-compare MODEL=… LANGUAGE_ONLY=1 COMPARE_ARGS="--scenario short,partial"`
+runs the scenarios alone, with the split twice and alone again, and prints one
+table of both — the change in prefill time, tokens a second and time to first
+token — with the split's bytes and the context it costs. A run prints its
+table on its error stream and nothing else: `--json` writes its JSON on
+standard output, and `--verbose` prints each measurement as it is taken.
 
 Measured on an M4 Pro (16-core GPU, 24 GB), Inkling-2-Mini `UD-IQ3_XXS`, 8
 experts of 512 packed rows on all 24 blocks (1.5 GiB), prefill GPU
