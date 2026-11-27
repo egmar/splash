@@ -1795,6 +1795,25 @@ int main(int argc, char **argv) {
     // it, and the one its memory plan holds without the Neural Engine split,
     // and its elastic state/KV budget and the split's.
     const engine::EngineMemoryBreakdown &plan = resources->memoryPlan().breakdown();
+    // The run as a table on stderr, so it can be read without the JSON that
+    // stdout carries: prefill GPU milliseconds and tokens a second, the first
+    // token, and what the plan holds (the split's bytes, the context).
+    std::fprintf(stderr, "\nprefill (GPU ms, tokens/s): split %llu MiB, context %u tokens\n",
+                 static_cast<unsigned long long>(plan.aneFfnBytes / (1 << 20)), engineConfig.maxContext);
+    std::fprintf(stderr, "  %-20s %7s %9s %8s %9s %-10s\n", "scenario", "tokens", "prefill", "tok/s", "ttft",
+                 "cache");
+    for (const Measurement &measurement : measurements) {
+      const double perSecond = measurement.prefillGpuMilliseconds > 0.0
+                                   ? 1000.0 * measurement.promptTokens / measurement.prefillGpuMilliseconds
+                                   : 0.0;
+      std::fprintf(stderr, "  %-20s %7u %9.0f %8.0f %9.0f %-10s\n", measurement.scenario.c_str(),
+                   measurement.promptTokens, measurement.prefillGpuMilliseconds, perSecond,
+                   measurement.ttftMilliseconds, measurement.cacheStatus.c_str());
+    }
+    std::fprintf(stderr, "decode warmup (GPU ms, 1..%zu lanes):", decodeWarmupGpu.size());
+    for (const double milliseconds : decodeWarmupGpu)
+      std::fprintf(stderr, " %.0f", milliseconds);
+    std::fprintf(stderr, "\n\n");
     std::cout << "]},\"max_context_tokens\":" << engineConfig.maxContext
               << ",\"no_ane_context_tokens\":" << resources->aneFfnOutcome().contextWithout
               << ",\"dynamic_budget_bytes\":" << plan.dynamicBudgetBytes
