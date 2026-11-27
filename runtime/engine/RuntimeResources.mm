@@ -1093,7 +1093,26 @@ RuntimeResources::create(const RuntimeResourcesConfig &config,
       moeLoads = ops::AneMoe::parseLoads(*line, static_cast<uint32_t>(moeSplit.blocks.size()),
                                          moeSplit.shape.experts)
                      .value_or(ops::AneMoe::Loads{});
-    const ops::AneMoe::Plan plan = ops::AneMoe::plan(shapes, moeLoads, selection);
+    // Without counts this build has run yet, the router's selection bias is
+    // the only prior there is: it enters each expert's score in the selection,
+    // so the experts it favours are the ones the routes reach before any have
+    // been counted (experts 0-7 take 4.4% where the favoured ones take 15-25%).
+    ops::AneMoe::Loads prior = moeLoads;
+    if (prior.empty()) {
+      for (const ops::BlockMoeWeights *block : moeSplit.blocks) {
+        std::vector<uint64_t> counts(moeSplit.shape.experts, 0);
+        if (block->selectionBias && block->selectionBias.sizeBytes() >= uint64_t{moeSplit.shape.experts} *
+                                                                               sizeof(float) &&
+            block->selectionBias.contents()) {
+          const auto *bias = static_cast<const float *>(block->selectionBias.contents());
+          const float least = *std::min_element(bias, bias + moeSplit.shape.experts);
+          for (uint32_t expert = 0; expert < moeSplit.shape.experts; ++expert)
+            counts[expert] = static_cast<uint64_t>((double(bias[expert]) - least) * 1e6);
+        }
+        prior.push_back(std::move(counts));
+      }
+    }
+    const ops::AneMoe::Plan plan = ops::AneMoe::plan(shapes, prior, selection);
     if (plan.rows() != plannedTarget.aneMoeRows)
       throw std::logic_error("the Neural Engine MoE split's rows are not the arena's region");
     aneMoeBytes = ops::AneMoe::plannedBytes(moeSplit.shape, plan, static_cast<uint32_t>(moeSplit.blocks.size()));

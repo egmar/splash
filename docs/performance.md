@@ -142,10 +142,10 @@ Give every `make` target the model's own options (`MODEL=`, and
 that its selection names, and a selection is its source options as well as
 its model. `--ane-moe-experts` is the experts each block keeps and
 `--ane-moe-capacity` the packed rows each holds; their product is the rows the join writes, at most
-8,192. Run each configuration twice and read the second run: the first after a
-build learns which experts the routes reach, keeps the counts under the
-build's calibration key, and only the next start plans the residents from
-them. A command splits only from about an eighth of its group's rows — 512 at
+8,192. A first run after a build starts from the router's own selection bias —
+it favours each expert in the selection, so it says which ones the routes
+reach before any have been counted — and keeps the counts it sees under the
+build's calibration key, which the next start plans from exactly. A command splits only from about an eighth of its group's rows — 512 at
 4,096, 1,024 at 8,192 — because the ANE evaluates the whole region whatever a
 command routes: a cached prefix's 32-row prefill took 1.4 s with the split
 against 190 ms without it. A start says what it took on its log line, and

@@ -273,7 +273,9 @@ NOTE_ALLOWANCE: dict[str, int] = {
 # split from the runs before, which its constructor takes. 31,368 adds 1 for
 # the split's log line, which now says what it planned and what it allocated.
 # 31,374 adds 6 for the routes its marks counted, in its snapshot and /status.
-ENGINE_LINE_BUDGET = 31_374
+# 31,393 adds 19 for the residents a start picks before it has counts, from
+# the router's selection bias.
+ENGINE_LINE_BUDGET = 31_393
 C_LIKE_SUFFIXES = SOURCE_SUFFIXES | {".swift"}
 HASH_COMMENT_SUFFIXES = {"", ".sh", ".bash", ".fish", ".mk", ".yml", ".yaml", ".toml"}
 C_LIKE_COMMENT = re.compile(
