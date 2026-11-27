@@ -1409,7 +1409,8 @@ RuntimeResources::create(const RuntimeResourcesConfig &config,
                                                config.cancelled);
         logLine("Neural Engine MoE split: ", moePlan->experts, " experts of ", moePlan->capacity,
                 " packed rows a block, ", moeSplit.blocks.size(), " blocks, ",
-                std::fixed, std::setprecision(2), static_cast<double>(aneMoeBytes) / (1 << 20), " MiB.");
+                std::fixed, std::setprecision(2), static_cast<double>(aneMoeBytes) / (1 << 20), " MiB planned, ",
+                static_cast<double>(aneMoe->allocatedBytes()) / (1 << 20), " MiB allocated.");
       } catch (const std::exception &error) {
         aneMoeOutcome = error.what();
         logWarning("Neural Engine MoE split not taken: ", error.what());

@@ -189,7 +189,14 @@ void splitChecks(MetalBackend &backend) {
   std::cout << "  block " << moe_fixture::formatNames(model) << ", experts " << plan.experts << " and "
             << plan.resident.front()[0] << "/" << plan.resident.front()[1] << " of capacity " << plan.capacity << '\n';
   const std::array<const BlockMoeWeights *, 1> blocks{&model.weights};
+  // What a start sets aside for the split bounds what it allocates: the
+  // memory audit compares the two, and a surface or buffer planned at the
+  // wrong width (a scale a row where the graph takes one a group of 32) fails
+  // it as a plan too small.
   AneMoe split(backend, std::span(blocks), block, plan, {}, {});
+  if (AneMoe::plannedBytes(block, plan, 1) < split.allocatedBytes())
+    fail("the split allocates " + std::to_string(split.allocatedBytes()) + " bytes, more than the " +
+         std::to_string(AneMoe::plannedBytes(block, plan, 1)) + " it plans");
   if (split.regionRows() != plan.rows()) fail("the block's region is not its group's rows");
   if (split.splits(AneMoe::kMinimumRows - 1) || !split.splits(AneMoe::kMinimumRows) ||
       !split.splits(kRows) || !split.splits(AneMoe::kMaximumRows) || split.splits(AneMoe::kMaximumRows + 1))
@@ -343,7 +350,14 @@ void stepChecks(MetalBackend &backend) {
   if (plan.resident.front() != std::vector<uint32_t>{1, 3})
     fail("the step's resident experts are not the most-routed");
   const std::array<const BlockMoeWeights *, 1> blocks{&model.weights};
+  // What a start sets aside for the split bounds what it allocates: the
+  // memory audit compares the two, and a surface or buffer planned at the
+  // wrong width (a scale a row where the graph takes one a group of 32) fails
+  // it as a plan too small.
   AneMoe split(backend, std::span(blocks), block, plan, {}, {});
+  if (AneMoe::plannedBytes(block, plan, 1) < split.allocatedBytes())
+    fail("the split allocates " + std::to_string(split.allocatedBytes()) + " bytes, more than the " +
+         std::to_string(AneMoe::plannedBytes(block, plan, 1)) + " it plans");
   const MoePlan plainPlan = MoE::plan(block, kRows, MoeConfig{});
   const MoePlan splitPlan = MoE::plan(block, kRows, MoeConfig{.aneRows = plan.rows()});
   if (splitPlan.workspace().expertOutputBytes <= plainPlan.workspace().expertOutputBytes)

@@ -270,8 +270,9 @@ NOTE_ALLOWANCE: dict[str, int] = {
 # for the next start's plan, and the key they are remembered under. 31,364 adds
 # 67 for /status: the split's snapshot, its fields in the status sample and its
 # line in the status JSON. 31,367 adds 3 for the route counts a start hands the
-# split from the runs before, which its constructor takes.
-ENGINE_LINE_BUDGET = 31_367
+# split from the runs before, which its constructor takes. 31,368 adds 1 for
+# the split's log line, which now says what it planned and what it allocated.
+ENGINE_LINE_BUDGET = 31_368
 C_LIKE_SUFFIXES = SOURCE_SUFFIXES | {".swift"}
 HASH_COMMENT_SUFFIXES = {"", ".sh", ".bash", ".fish", ".mk", ".yml", ".yaml", ".toml"}
 C_LIKE_COMMENT = re.compile(

@@ -98,8 +98,9 @@ uint64_t AneMoe::expertBytes(const MoeShape &shape, uint32_t experts) {
   for (const auto &[rows, width] : {std::pair{intermediate, hidden}, std::pair{intermediate, hidden},
                                     std::pair{hidden, intermediate}})
     bytes += ane::Surface::bytes(rows, width, Element::Int8) * experts;
-  bytes += ane::Surface::bytes(intermediate, 1, Element::Float16) * 2 * experts;
-  bytes += ane::Surface::bytes(hidden, 1, Element::Float16) * experts;
+  // A scale each group of 32 inputs a row (function()'s graph), not a row.
+  bytes += ane::Surface::bytes(intermediate, hidden / 32, Element::Float16) * 2 * experts;
+  bytes += ane::Surface::bytes(hidden, intermediate / 32, Element::Float16) * experts;
   return bytes;
 }
 
@@ -112,6 +113,7 @@ uint64_t AneMoe::plannedBytes(const MoeShape &shape, const Plan &plan, uint32_t 
   uint64_t bytes = expertBytes(shape, plan.experts) * blocks;
   bytes += alignUp(uint64_t{shape.experts} * sizeof(uint32_t));
   bytes += alignUp(uint64_t{blocks} * 2 * shape.experts * sizeof(uint32_t));
+  bytes += alignUp(uint64_t{blocks} * shape.experts * sizeof(uint32_t));
   bytes += alignUp(rows * sizeof(uint32_t));
   bytes += alignUp(rows * hidden * sizeof(_Float16));
   const auto width = static_cast<uint32_t>(rows);
