@@ -915,8 +915,10 @@ ANE_MOE_ARGS ?= plan-check
 benchmark-ane-moe: $(TEST_ANE_MOE_BENCHMARK) $(LIB)
 	$(TEST_ANE_MOE_BENCHMARK) $(ANE_MOE_ARGS)
 
+# BACKEND_ARGS passes the benchmark's own options, such as the prefill MoE's
+# Neural Engine split: BACKEND_ARGS="--ane-moe-experts 8 --ane-moe-capacity 1024".
 benchmark-backend: preflight $(TARGET) $(TEST_BACKEND_BENCHMARK) $(LIB)
-	$(TEST_BACKEND_BENCHMARK) $(LIB) "$(MODEL_ROOT)"
+	$(TEST_BACKEND_BENCHMARK) $(LIB) "$(MODEL_ROOT)" $(BACKEND_ARGS)
 
 # CPU tests that also run under the sanitizers: each is built three times
 # from the same sources, once as the CPU tests above are and once under each
