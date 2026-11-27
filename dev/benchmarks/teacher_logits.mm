@@ -52,6 +52,7 @@
 #include "model/RuntimeInstrumentation.hpp"
 #include "model/SsdReaders.hpp"
 #include "ops/PageStorage.hpp"
+#include "ane/Program.hpp"
 #include "ops/AneMoe.hpp"
 #include "tools/LoadOptions.hpp"
 
@@ -356,13 +357,26 @@ int main(int argc, char **argv) {
       // The prefill MoE's Neural Engine split, its resident copies built
       // before the runtime whose step scratch its region sizes.
       std::unique_ptr<ops::AneMoe> aneMoe;
+      std::string aneMoeKey;
       if (aneMoeExperts) {
         const model::MoeBlocks blocks = model::moeBlocks(model);
         if (blocks.blocks.empty()) throw std::invalid_argument("this model has no MoE block to split");
         const std::vector<ops::MoeShape> shapes(blocks.blocks.size(), blocks.shape);
+        // The counts splash serve has kept for this build (AneMoe's
+        // calibration key), so the run scores the split the engine would
+        // serve rather than the first experts of every block.
+        const std::string key = ops::AneMoe::calibrationKey(blocks.blocks, blocks.shape) + " device " +
+                                backend.capabilities().deviceName + " macos " +
+                                std::string([[NSProcessInfo processInfo] operatingSystemVersionString].UTF8String) +
+                                " build " + SPLASH_BUILD_ID;
+        ops::AneMoe::Loads loads;
+        if (const std::optional<std::string> line = ane::recall(key))
+          loads = ops::AneMoe::parseLoads(*line, static_cast<uint32_t>(blocks.blocks.size()), blocks.shape.experts)
+                      .value_or(ops::AneMoe::Loads{});
+        aneMoeKey = key;
         aneMoe = std::make_unique<ops::AneMoe>(
             backend, blocks.blocks, blocks.shape,
-            ops::AneMoe::plan(shapes, {}, {.experts = *aneMoeExperts, .capacity = *aneMoeCapacity}), {},
+            ops::AneMoe::plan(shapes, loads, {.experts = *aneMoeExperts, .capacity = *aneMoeCapacity}), loads,
             std::function<bool ()>{});
       }
       // Every cycle verifies, and so retains, every row of its block.
@@ -400,6 +414,9 @@ int main(int argc, char **argv) {
       for (size_t index = 0; index < windows.size(); ++index)
         runWindow(executor, tokens, windows[index], index + 1, pageTable, vocabulary, argv[4],
                   captures ? rowWidth : 0, draft);
+      // The routes the run saw, kept for the next start's plan as splash
+      // serve keeps them.
+      if (aneMoe) static_cast<void>(ane::remember(aneMoeKey, ops::AneMoe::encodeLoads(aneMoe->loads())));
       return 0;
     } catch (const std::exception &error) {
       std::cerr << "teacher-logits: " << error.what() << '\n';

@@ -580,7 +580,9 @@ $(TEST_INKLING2_TARGET): dev/tests/engine/inkling2_target_test.mm \
 		$(ENGINE_INSTRUMENTED_RUNTIME_OBJECT) $(ENGINE_LIBRARY) $(LIB)
 $(TEST_TEACHER_LOGITS): dev/benchmarks/teacher_logits.mm \
 		dev/tools/LoadOptions.hpp \
-		$(ENGINE_INSTRUMENTED_RUNTIME_OBJECT) $(ENGINE_LIBRARY) $(LIB)
+		$(ENGINE_INSTRUMENTED_RUNTIME_OBJECT) $(ENGINE_LIBRARY) $(LIB) $(BUILD_ID_HEADER)
+# The split's counts are kept under the build's identity, as the engine's are.
+$(TEST_TEACHER_LOGITS): ENGINE_TEST_CXXFLAGS += -include $(BUILD_ID_HEADER)
 $(TEST_ATTENTION_SWEEP): dev/benchmarks/attention_sweep.mm \
 		dev/benchmarks/DispatchReplay.hpp \
 		$(ENGINE_LIBRARY) $(LIB)
