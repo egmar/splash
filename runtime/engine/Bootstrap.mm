@@ -226,6 +226,7 @@ std::string ServingRuntime::statusJson() {
                       .pipelinesCreatedWhileServing = backend.pipelinesCreatedWhileServing(),
                       .memoryGovernor = resources_->memoryGovernor().snapshot(),
                       .aneFfn = resources_->aneFfnSnapshot(),
+                      .aneMoe = resources_->aneMoeSnapshot(),
                       .thermalState = thermalState_.state(),
                       .loopMaxTickMilliseconds = loopMaxTick_(),
                       .streamedTable = resources_->streamedTableStats(),

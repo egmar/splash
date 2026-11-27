@@ -3,6 +3,7 @@
 #include "ops/AneMoe.hpp"
 #include "ops/Vision.hpp"
 #include "engine/AneFfnStartup.hpp"
+#include "engine/AneMoeStatus.hpp"
 #include "engine/MemoryPlan.hpp"
 #include "engine/Cache.hpp"
 #include "engine/CacheDirectory.hpp"
@@ -350,6 +351,7 @@ public:
   void finishAneFfn(double prefillMilliseconds, model::RuntimeModel &runtime);
   // The split as it stands now, for /status.
   [[nodiscard]] AneFfnSnapshot aneFfnSnapshot() const;
+  [[nodiscard]] AneMoeSnapshot aneMoeSnapshot() const;
   // The streamed PLE table's store (--ple-memory), if the model has one.
   [[nodiscard]] std::optional<model::SparseRowStats> streamedTableStats() const;
   // The streamed routed experts' store (--expert-memory), if the model has one.
@@ -388,7 +390,8 @@ private:
                    std::unique_ptr<KvPool> kvPool,
                    std::unique_ptr<engine::Cache> cache,
                    AneFfnStart aneFfn, std::unique_ptr<ops::AneMoe> aneMoe, std::string aneMoeKey,
-                   kv::Format kvFormat, std::string buildId, std::function<bool()> cancelled,
+                   std::string aneMoeOutcome, kv::Format kvFormat, std::string buildId,
+                   std::function<bool()> cancelled,
                    std::unique_ptr<model::KvBlockCache> blockCache,
                    std::unique_ptr<model::KvHistoryStream> historyStream, bool spillAlways,
                    model::VerifyRows verifyRows);
@@ -422,8 +425,9 @@ private:
   // The prefill MoE's split, built before the runtime whose step scratch its
   // region sizes (model::moeBlocks, RuntimeContext::aneMoe).
   std::unique_ptr<ops::AneMoe> aneMoe_;
-  // The key its marks' counts are kept under (ops::AneMoe::calibrationKey).
-  std::string aneMoeKey_;
+  // The key its marks' counts are kept under (ops::AneMoe::calibrationKey),
+  // and why the start took no split.
+  std::string aneMoeKey_, aneMoeOutcome_;
   // A spill-capable target's readers of its spilled KV; none for another.
   std::unique_ptr<model::KvBlockCache> blockCache_;
   std::unique_ptr<model::KvHistoryStream> historyStream_;

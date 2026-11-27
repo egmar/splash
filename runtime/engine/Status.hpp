@@ -1,6 +1,7 @@
 #pragma once
 
 #include "engine/AneFfnStartup.hpp"
+#include "engine/AneMoeStatus.hpp"
 #include "engine/Engine.hpp"
 #include "engine/MemoryAudit.hpp"
 #include "engine/MemoryGovernor.hpp"
@@ -67,6 +68,7 @@ struct StatusSample final {
   uint64_t pipelinesCreatedWhileServing = 0;
   MemoryGovernorSnapshot memoryGovernor;
   AneFfnSnapshot aneFfn;
+  AneMoeSnapshot aneMoe;
   ThermalState thermalState = ThermalState::Nominal;
   // The loop's longest tick, which its transport measures.
   double loopMaxTickMilliseconds = 0.0;

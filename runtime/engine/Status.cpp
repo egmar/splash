@@ -56,6 +56,21 @@ void writeAneFfn(json::Writer &w, const AneFfnSnapshot &split, uint64_t reruns) 
   });
 }
 
+void writeAneMoe(json::Writer &w, const AneMoeSnapshot &split) {
+  constexpr std::string_view kStates[] = {"off", "split", "stopped"};
+  w.object([&] {
+    w.field("state", kStates[static_cast<size_t>(split.state)])
+        .field("experts", split.perBlock)
+        .field("capacity", split.rowsPerCopy)
+        .field("blocks", split.blocks)
+        .field("region_rows", split.joinRows)
+        .field("reason", split.reason)
+        .field("bytes", split.allocatedBytes)
+        .field("split_commands", split.commands)
+        .field("evaluations", split.evaluations);
+  });
+}
+
 void writeBatch(json::Writer &w, const RuntimeBatchMetricsSnapshot &batch) {
   w.object([&] {
     w.field("valid", batch.valid)
@@ -795,6 +810,8 @@ std::string runtimeStatusJson(const StatusStart &start, const StatusSample &samp
     }
     w.key("ane_ffn");
     writeAneFfn(w, sample.aneFfn, executorTelemetry.aneFfnReruns);
+    w.key("ane_moe");
+    writeAneMoe(w, sample.aneMoe);
     w.key("kv");
     writeKv(w, core.resources);
     w.key("state");

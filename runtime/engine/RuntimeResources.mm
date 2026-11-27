@@ -613,8 +613,8 @@ RuntimeResources::RuntimeResources(
     std::unique_ptr<model::QwenStateStorage> stateStorage,
     std::unique_ptr<KvPageTier> kvTier, std::unique_ptr<DiskSpace> diskSpace,
     std::unique_ptr<KvPool> kvPool, std::unique_ptr<engine::Cache> cache,
-    AneFfnStart aneFfn, std::unique_ptr<ops::AneMoe> aneMoe, std::string aneMoeKey, kv::Format kvFormat,
-    std::string buildId, std::function<bool()> cancelled,
+    AneFfnStart aneFfn, std::unique_ptr<ops::AneMoe> aneMoe, std::string aneMoeKey, std::string aneMoeOutcome,
+    kv::Format kvFormat, std::string buildId, std::function<bool()> cancelled,
     std::unique_ptr<model::KvBlockCache> blockCache,
     std::unique_ptr<model::KvHistoryStream> historyStream, bool spillAlways,
     model::VerifyRows verifyRows)
@@ -628,7 +628,7 @@ RuntimeResources::RuntimeResources(
       stateStorage_(std::move(stateStorage)), kvTier_(std::move(kvTier)),
       diskSpace_(std::move(diskSpace)), kvPool_(std::move(kvPool)),
       cache_(std::move(cache)), aneFfn_(std::move(aneFfn.split)), aneMoe_(std::move(aneMoe)),
-      aneMoeKey_(std::move(aneMoeKey)),
+      aneMoeKey_(std::move(aneMoeKey)), aneMoeOutcome_(std::move(aneMoeOutcome)),
       blockCache_(std::move(blockCache)), historyStream_(std::move(historyStream)),
       // The split serves from the start or once set up (finishAneFfn), until
       // the engine ends.
@@ -1069,7 +1069,7 @@ RuntimeResources::create(const RuntimeResourcesConfig &config,
       config.aneMoeExperts && config.aneMoeCapacity ? model::moeBlocks(loaded) : model::MoeBlocks{};
   std::optional<ops::AneMoe::Plan> moePlan;
   uint64_t aneMoeBytes = 0;
-  std::string aneMoeKey;
+  std::string aneMoeKey, aneMoeOutcome;
   if (!moeSplit.blocks.empty()) {
     const std::vector<ops::MoeShape> shapes(moeSplit.blocks.size(), moeSplit.shape);
     const ops::AneMoe::Selection selection{.experts = config.aneMoeExperts,
@@ -1408,6 +1408,7 @@ RuntimeResources::create(const RuntimeResourcesConfig &config,
                 " packed rows a block, ", moeSplit.blocks.size(), " blocks, ",
                 std::fixed, std::setprecision(2), static_cast<double>(aneMoeBytes) / (1 << 20), " MiB.");
       } catch (const std::exception &error) {
+        aneMoeOutcome = error.what();
         logWarning("Neural Engine MoE split not taken: ", error.what());
       }
     }
@@ -1416,7 +1417,8 @@ RuntimeResources::create(const RuntimeResourcesConfig &config,
         std::move(operators), std::move(memoryPlan), std::move(cacheIdentity),
         std::move(memoryGovernor), startClaim, std::move(startScope), std::move(kvPages), std::move(stateStorage),
         std::move(kvTier), std::move(disk.space), std::move(kvPool), std::move(cache),
-        std::move(aneFfn), std::move(aneMoe), std::move(aneMoeKey), config.kvFormat, config.buildId,
+        std::move(aneFfn), std::move(aneMoe), std::move(aneMoeKey), std::move(aneMoeOutcome), config.kvFormat,
+        config.buildId,
         config.cancelled, std::move(blockCache), std::move(historyStream), config.kvSpillAlways,
         config.verifyRows));
     result->adoptPersistentCache();
@@ -1607,6 +1609,20 @@ AneFfnSnapshot RuntimeResources::aneFfnSnapshot() const {
           served.commands,
           served.evaluations,
           served.milliseconds};
+}
+
+AneMoeSnapshot RuntimeResources::aneMoeSnapshot() const {
+  if (!aneMoe_) return {.reason = aneMoeOutcome_};
+  const ops::AneMoe::Served &served = aneMoe_->served();
+  return {aneMoe_->retired() ? AneMoeSnapshot::State::Stopped : AneMoeSnapshot::State::Split,
+          aneMoe_->retired() ? aneMoe_->reason() : std::string{},
+          aneMoe_->plan().experts,
+          aneMoe_->plan().capacity,
+          static_cast<uint32_t>(aneMoe_->plan().resident.size()),
+          aneMoe_->regionRows(),
+          aneMoe_->allocatedBytes(),
+          served.commands,
+          served.evaluations};
 }
 
 ActualMemoryReport RuntimeResources::actualMemoryReport(

@@ -267,8 +267,10 @@ NOTE_ALLOWANCE: dict[str, int] = {
 # the member the runtime's context hands it on (ops::AneMoe). 31,273 adds 15
 # for its log line and the memory audit's count of the split's own memory
 # beside the dense split's. 31,297 adds 24 for the route counts its marks keep
-# for the next start's plan, and the key they are remembered under.
-ENGINE_LINE_BUDGET = 31_297
+# for the next start's plan, and the key they are remembered under. 31,364 adds
+# 67 for /status: the split's snapshot, its fields in the status sample and its
+# line in the status JSON.
+ENGINE_LINE_BUDGET = 31_364
 C_LIKE_SUFFIXES = SOURCE_SUFFIXES | {".swift"}
 HASH_COMMENT_SUFFIXES = {"", ".sh", ".bash", ".fish", ".mk", ".yml", ".yaml", ".toml"}
 C_LIKE_COMMENT = re.compile(
