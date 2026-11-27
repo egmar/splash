@@ -464,6 +464,32 @@ class ScriptEntryTests(unittest.TestCase):
         output = self.run_script("--model", "someone/model:Q4_K_M", "verify")
         self.assertIn("error: someone/model:Q4_K_M is not installed in ", output)
 
+    def test_verifying_another_selection_of_the_model_names_it(self):
+        # A selection's source options are part of its link: a model installed
+        # without --language-only is not the installation a --language-only
+        # start reads, so the error names the one it does have.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            models = root / "models"
+            installed = models / ".selections" / "abc123"
+            installed.mkdir(parents=True)
+            (installed / "model.json").write_text(json.dumps({"model": "someone/model:Q4_K_M"}))
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(Path(installer.__file__).resolve()),
+                    "--models", str(models),
+                    "--model", "someone/model:Q4_K_M", "--language-only", "verify",
+                ],
+                env={"HOME": str(root / "home"), "HF_HUB_OFFLINE": "1", "HF_HUB_CACHE": str(root / "hub")},
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 1, output)
+        self.assertIn(f"{installed} is, and a selection is its source options as well as its model", output)
+
     def test_installer_runs_as_a_script(self):
         # As the launcher and make run it: by path, from any working
         # directory.

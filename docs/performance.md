@@ -137,8 +137,11 @@ make benchmark-backend MODEL=unsloth/Inkling-2-Mini-GGUF:UD-IQ3_XXS \
   BACKEND_ARGS="--scenario short --ane-moe-experts 8 --ane-moe-capacity 1024"
 ```
 
-`--ane-moe-experts` is the experts each block keeps and `--ane-moe-capacity`
-the packed rows each holds; their product is the rows the join writes, at most
+Give every `make` target the model's own options (`MODEL=`, and
+`LANGUAGE_ONLY=1` if you installed with it): a start reads the installation
+that its selection names, and a selection is its source options as well as
+its model. `--ane-moe-experts` is the experts each block keeps and
+`--ane-moe-capacity` the packed rows each holds; their product is the rows the join writes, at most
 8,192. Run each configuration twice and read the second run: the first after a
 build learns which experts the routes reach, keeps the counts under the
 build's calibration key, and only the next start plans the residents from

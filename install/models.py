@@ -302,6 +302,28 @@ class Selection:
         )
 
 
+def installed_selections(selection):
+    """The selection links of `selection`'s model that hold an installation,
+    its model.json naming it: a selection's source options (--language-only,
+    --revision, --draft-model) are part of its link, so a start with others
+    than the install's finds nothing at its own."""
+    root = selection.models_root
+    found = []
+    # The model's own links (OWNER/REPO[:VARIANT]) and its selections with
+    # source options, not the .resolved copies a selection points at.
+    links = [link for link in root.glob("*/*") if not link.parts[-2].startswith(".")]
+    for link in [*links, *(root / ".selections").glob("*")]:
+        if link == selection.link:
+            continue
+        try:
+            record = read_json(link / "model.json")
+        except (ModelError, OSError):
+            continue
+        if isinstance(record, dict) and record.get("model") == selection.model:
+            found.append(link)
+    return found
+
+
 def installation_kind(link: Path):
     """What serves a selection link: an assembly (its model.json), a Splash
     package an earlier release installed (its manifest.json), or nothing
@@ -446,7 +468,16 @@ def main(argv=None):
                     selection.link,
                 )
             if kind != ASSEMBLY:
-                raise ModelError(f"{args.model} is not installed in {args.models}")
+                # A selection's source options are part of its link: name the
+                # installation the same model has under others, if any.
+                others = installed_selections(selection)
+                hint = (
+                    f"; {others[0]} is, and a selection is its source options as"
+                    " well as its model"
+                    if others
+                    else ""
+                )
+                raise ModelError(f"{args.model} is not installed in {args.models}{hint}")
             assembly.verify(selection.link, full=args.full)
             print(
                 f"Splash model {args.model} preflight passed "
