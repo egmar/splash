@@ -262,8 +262,12 @@ NOTE_ALLOWANCE: dict[str, int] = {
 # 99 for the tails behind a lane, which a windowed cache gives up where the
 # budget refuses: the states that pin them leave, oldest first, and a Full
 # extent their trims empty beyond the lanes' floors pays for the Slim ones
-# (Cache::releaseTails).
-ENGINE_LINE_BUDGET = 31_209
+# (Cache::releaseTails). 31,258 adds 49 for the prefill MoE's Neural Engine
+# split: its blocks and plan, the bytes it sets aside in the memory plan, and
+# the member the runtime's context hands it on (ops::AneMoe). 31,273 adds 15
+# for its log line and the memory audit's count of the split's own memory
+# beside the dense split's.
+ENGINE_LINE_BUDGET = 31_273
 C_LIKE_SUFFIXES = SOURCE_SUFFIXES | {".swift"}
 HASH_COMMENT_SUFFIXES = {"", ".sh", ".bash", ".fish", ".mk", ".yml", ".yaml", ".toml"}
 C_LIKE_COMMENT = re.compile(

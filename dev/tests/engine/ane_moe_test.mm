@@ -28,6 +28,7 @@
 #include "ops/MoE.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -165,7 +166,7 @@ void planChecks() {
   splash::test::rejects([&] { static_cast<void>(AneMoe::plan(shapes, corpus, AneMoe::Selection{.experts = 2, .capacity = 33})); },
                         "capacity", "a plan of a capacity not whole quanta accepted");
   // The key names the blocks' shapes and formats.
-  const std::string key = AneMoe::calibrationKey(std::span<const BlockMoeWeights>{}, block);
+  const std::string key = AneMoe::calibrationKey(std::span<const BlockMoeWeights *const>{}, block);
   if (key.find("256x128e4") == std::string::npos) fail("the calibration key does not name the shapes: " + key);
 }
 
@@ -187,7 +188,8 @@ void splitChecks(MetalBackend &backend) {
       AneMoe::plan(shapes, loads(), AneMoe::Selection{.experts = kResidentExperts, .capacity = kCapacity});
   std::cout << "  block " << moe_fixture::formatNames(model) << ", experts " << plan.experts << " and "
             << plan.resident.front()[0] << "/" << plan.resident.front()[1] << " of capacity " << plan.capacity << '\n';
-  AneMoe split(backend, std::span(&model.weights, 1), block, plan, {});
+  const std::array<const BlockMoeWeights *, 1> blocks{&model.weights};
+  AneMoe split(backend, std::span(blocks), block, plan, {});
   if (split.regionRows() != plan.rows()) fail("the block's region is not its group's rows");
   if (split.splits(AneMoe::kMinimumRows - 1) || !split.splits(AneMoe::kMinimumRows) ||
       !split.splits(kRows) || !split.splits(AneMoe::kMaximumRows) || split.splits(AneMoe::kMaximumRows + 1))
@@ -321,7 +323,7 @@ void splitChecks(MetalBackend &backend) {
       }
   }
   // A plan of no block takes no command.
-  AneMoe empty(backend, std::span(&model.weights, 1), block, AneMoe::Plan{}, {});
+  AneMoe empty(backend, std::span(blocks), block, AneMoe::Plan{}, {});
   if (empty.splits(kRows) || empty.regionRows()) fail("a split of no block takes a command");
 }
 
@@ -340,7 +342,8 @@ void stepChecks(MetalBackend &backend) {
                                          AneMoe::Selection{.experts = kResidentExperts, .capacity = kCapacity});
   if (plan.resident.front() != std::vector<uint32_t>{1, 3})
     fail("the step's resident experts are not the most-routed");
-  AneMoe split(backend, std::span(&model.weights, 1), block, plan, {});
+  const std::array<const BlockMoeWeights *, 1> blocks{&model.weights};
+  AneMoe split(backend, std::span(blocks), block, plan, {});
   const MoePlan plainPlan = MoE::plan(block, kRows, MoeConfig{});
   const MoePlan splitPlan = MoE::plan(block, kRows, MoeConfig{.aneRows = plan.rows()});
   if (splitPlan.workspace().expertOutputBytes <= plainPlan.workspace().expertOutputBytes)

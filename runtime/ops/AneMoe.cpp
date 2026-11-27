@@ -102,6 +102,24 @@ uint64_t AneMoe::expertBytes(const MoeShape &shape, uint32_t experts) {
   return bytes;
 }
 
+uint64_t AneMoe::plannedBytes(const MoeShape &shape, const Plan &plan, uint32_t blocks) {
+  if (plan.empty() || !blocks) return 0;
+  const uint64_t rows = plan.rows(), hidden = shape.hiddenSize;
+  // The residents' weights, then the chunk scratch: the cursors, each
+  // block's mark tables, the columns' route list, the rows the pack
+  // transposes and the ANE's input, scales and output, and the status word.
+  uint64_t bytes = expertBytes(shape, plan.experts) * blocks;
+  bytes += alignUp(uint64_t{shape.experts} * sizeof(uint32_t));
+  bytes += alignUp(uint64_t{blocks} * 2 * shape.experts * sizeof(uint32_t));
+  bytes += alignUp(rows * sizeof(uint32_t));
+  bytes += alignUp(rows * hidden * sizeof(_Float16));
+  const auto width = static_cast<uint32_t>(rows);
+  bytes += ane::Surface::bytes(shape.hiddenSize, width, Element::Int8);
+  bytes += ane::Surface::bytes(1, width, Element::Float16);
+  bytes += ane::Surface::bytes(shape.hiddenSize, width, Element::Float16);
+  return bytes + alignUp(sizeof(uint32_t));
+}
+
 AneMoe::Selection AneMoe::select(std::span<const MoeShape> shapes, const Loads &loads, uint64_t budget) {
   if (shapes.empty()) throw std::invalid_argument("ANE MoE selection has no blocks");
   if (!loads.empty() && loads.size() != shapes.size())
@@ -184,13 +202,13 @@ AneMoe::Plan AneMoe::plan(std::span<const MoeShape> shapes, const Loads &loads, 
   return result;
 }
 
-std::string AneMoe::calibrationKey(std::span<const BlockMoeWeights> blocks, const MoeShape &shape) {
+std::string AneMoe::calibrationKey(std::span<const BlockMoeWeights *const> blocks, const MoeShape &shape) {
   if (const char *reason = unsupported(shape)) throw std::invalid_argument(reason);
   std::string key = "ane-moe calibration " + std::to_string(shape.hiddenSize) + "x" +
                     std::to_string(shape.expertIntermediateSize) + "e" + std::to_string(shape.experts);
-  for (const BlockMoeWeights &block : blocks)
-    key += " :g" + std::to_string(block.gate.routed.formatId) + "," + std::to_string(block.up.routed.formatId) +
-           "," + std::to_string(block.down.routed.formatId);
+  for (const BlockMoeWeights *block : blocks)
+    key += " :g" + std::to_string(block->gate.routed.formatId) + "," + std::to_string(block->up.routed.formatId) +
+           "," + std::to_string(block->down.routed.formatId);
   return key + " softcaps " + std::to_string(shape.gateSoftcap) + "/" + std::to_string(shape.upSoftcap);
 }
 
@@ -290,9 +308,10 @@ std::string AneMoe::function(const MoeShape &shape, uint32_t experts, uint32_t c
   return "    func " + functionName(experts, capacity) + "<ios18>(" + parameters + ") {\n" + body + "    } -> (y);\n";
 }
 
-AneMoe::AneMoe(metal::MetalBackend &backend, std::span<const BlockMoeWeights> blocks, const MoeShape &shape,
+AneMoe::AneMoe(metal::MetalBackend &backend, std::span<const BlockMoeWeights *const> blocks, const MoeShape &shape,
                Plan plan, std::function<bool()> interrupted)
-    : backend_(backend), blocks_(blocks), shape_(shape), plan_(std::move(plan)), handoff_(backend, kHandoffBound) {
+    : backend_(backend), blocks_(blocks.begin(), blocks.end()), shape_(shape), plan_(std::move(plan)),
+      handoff_(backend, kHandoffBound) {
   if (const char *reason = unsupported(shape)) throw std::invalid_argument(reason);
   if (!plan_.resident.empty() && plan_.resident.size() != blocks.size())
     throw std::invalid_argument("ANE MoE split has residents of other blocks");
@@ -307,15 +326,16 @@ AneMoe::AneMoe(metal::MetalBackend &backend, std::span<const BlockMoeWeights> bl
     for (const uint32_t expert : resident)
       if (expert >= shape.experts) throw std::invalid_argument("ANE MoE split has an expert a block lacks");
   }
-  for (const BlockMoeWeights &block : blocks) {
-    if (block.stream) throw std::invalid_argument("ANE MoE split needs resident expert blocks");
-    for (const BlockExpertProjection *projection : {&block.gate, &block.up, &block.down}) {
+  for (const BlockMoeWeights *block : blocks_) {
+    if (!block) throw std::invalid_argument("ANE MoE split has no block");
+    if (block->stream) throw std::invalid_argument("ANE MoE split needs resident expert blocks");
+    for (const BlockExpertProjection *projection : {&block->gate, &block->up, &block->down}) {
       if (projection->routed.isFloat() || projection->routed.formatId >= GGUF_FMT_COUNT)
         throw std::invalid_argument("ANE MoE split needs quantized expert projections");
       requireSegmentPlanes(projection->routed, "ANE MoE expert projection");
     }
-    requireBytes(block.expertScales, uint64_t{3} * shape.experts * sizeof(float), "ANE MoE expert scales");
-    if (!block.expertScales.contents())
+    requireBytes(block->expertScales, uint64_t{3} * shape.experts * sizeof(float), "ANE MoE expert scales");
+    if (!block->expertScales.contents())
       throw std::invalid_argument("ANE MoE expert scales are not visible to the CPU");
   }
   const auto buffer = [&](uint64_t bytes, const char *label) {
@@ -408,7 +428,8 @@ AneMoe::AneMoe(metal::MetalBackend &backend, std::span<const BlockMoeWeights> bl
   for (size_t block = 0; block < blocks.size(); ++block) {
     const Group &group = groups_[block];
     if (group.experts.empty()) continue;
-    const std::vector<uint32_t> slots = slotsOf(blocks[block]);
+    const BlockMoeWeights &weights = *blocks[block];
+    const std::vector<uint32_t> slots = slotsOf(weights);
     for (size_t at = 0; at < group.experts.size(); ++at) {
       const uint32_t expert = group.experts[at], slot = slots.at(expert);
       if (slot == MOE_SLOT_ABSENT)
@@ -424,22 +445,22 @@ AneMoe::AneMoe(metal::MetalBackend &backend, std::span<const BlockMoeWeights> bl
                                      projection.routed.formatId, height, multiplier},
                   {(height + ANE_FFN_WEIGHT_ROWS - 1) / ANE_FFN_WEIGHT_ROWS, 1, 1}, {ANE_FFN_WEIGHT_THREADS, 1, 1});
       };
-      add(blocks[block].gate, group.gate[at], group.gateScale[at], slot * intermediate, hidden, hidden / 32,
-          intermediate, expertScale(blocks[block], shape_.experts, expert, 0));
-      add(blocks[block].up, group.up[at], group.upScale[at], slot * intermediate, hidden, hidden / 32, intermediate,
-          expertScale(blocks[block], shape_.experts, expert, 1));
-      add(blocks[block].down, group.down[at], group.downScale[at], slot * hidden, intermediate, intermediate / 32,
-          hidden, expertScale(blocks[block], shape_.experts, expert, 2) * float(kHeadroom));
+      add(weights.gate, group.gate[at], group.gateScale[at], slot * intermediate, hidden, hidden / 32, intermediate,
+          expertScale(weights, shape_.experts, expert, 0));
+      add(weights.up, group.up[at], group.upScale[at], slot * intermediate, hidden, hidden / 32, intermediate,
+          expertScale(weights, shape_.experts, expert, 1));
+      add(weights.down, group.down[at], group.downScale[at], slot * hidden, intermediate, intermediate / 32, hidden,
+          expertScale(weights, shape_.experts, expert, 2) * float(kHeadroom));
     }
   }
   if (!graph.dispatches().empty()) static_cast<void>(backend_.submitCommandAsync(graph.dispatches()).wait());
 }
 
 uint32_t AneMoe::blockOf(const BlockMoeWeights &weights) const {
-  const BlockMoeWeights *first = blocks_.data();
-  if (blocks_.empty() || &weights < first || &weights >= first + blocks_.size())
+  const auto found = std::find(blocks_.begin(), blocks_.end(), &weights);
+  if (found == blocks_.end())
     throw std::logic_error("ANE MoE split was asked to split a block it was not built from");
-  return static_cast<uint32_t>(&weights - first);
+  return static_cast<uint32_t>(found - blocks_.begin());
 }
 
 bool AneMoe::splits(uint32_t rows) const {

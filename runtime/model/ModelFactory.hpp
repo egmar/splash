@@ -207,6 +207,15 @@ loadModel(metal::MetalBackend &backend,
 // which the prefill FFN's Neural Engine split (ops::AneFfn) may take; none
 // for another target.
 [[nodiscard]] std::vector<ops::SwiGluProjections> aneFfnLayers(const LoadedModel &model);
+// The MoE blocks of a target (`qwenMoeBlock`) in weight-layer order, and the
+// shape their plans take: what the prefill MoE's Neural Engine split
+// (ops::AneMoe) requantizes its hottest experts of. Empty for a target whose
+// layers are dense or whose experts stream.
+struct MoeBlocks final {
+  std::vector<const ops::BlockMoeWeights *> blocks;
+  ops::MoeShape shape;
+};
+[[nodiscard]] MoeBlocks moeBlocks(const LoadedModel &model);
 // Runs `use` on a prefill arena allocated for the call: on the dense FFN's
 // buffers of a full chunk and the hidden rows layers alternate between.
 void withPrefillArena(
@@ -234,10 +243,11 @@ struct StreamedParts final {
 plannedRuntimeMemory(const LoadedModel &model,
                      const ops::ExecutionPlans &operators,
                      kv::Format kvFormat, ops::GdnStateFormat stateFormat, StreamedParts parts,
-                     uint32_t lanes = ExecutionLimits::defaultLanes);
+                     uint32_t lanes = ExecutionLimits::defaultLanes, uint32_t aneMoeRows = 0);
 // Those of a model of `descriptor` whose target's files give `target`
 // (plannedTargetGeometry) with `parts` streaming, before it loads: they plan
 // the stores of every part that may stream (engine::planStreamedMemory).
+// `aneMoeRows` is the prefill MoE's Neural Engine region (QwenTargetGeometry).
 [[nodiscard]] ModelMemoryPlan plannedRuntimeMemory(const ModelDescriptor &descriptor,
                                                    const QwenTargetGeometry &target,
                                                    const ops::ExecutionPlans &operators, kv::Format kvFormat,

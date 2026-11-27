@@ -94,6 +94,10 @@ public:
   // The int8 weights of `experts` experts of a block, and their scales: what
   // the split allocates for them.
   [[nodiscard]] static uint64_t expertBytes(const MoeShape &shape, uint32_t experts);
+  // The Metal memory of a split of `blocks` blocks with `plan`: their
+  // residents' int8 copies, the chunk scratch every application writes, and
+  // the mark tables of each block. An upper bound of allocatedBytes().
+  [[nodiscard]] static uint64_t plannedBytes(const MoeShape &shape, const Plan &plan, uint32_t blocks);
 
   // Why the split does not take blocks of `shape`, or null when it does: a
   // resident block of a routing without shared slices, unrotated quantized
@@ -102,16 +106,18 @@ public:
   [[nodiscard]] static const char *unsupported(const MoeShape &shape);
   // What tells this Mac's calibrations apart for one macOS version, engine
   // build and budget: the shapes and formats of the blocks' resident experts.
-  [[nodiscard]] static std::string calibrationKey(std::span<const BlockMoeWeights> blocks, const MoeShape &shape);
+  [[nodiscard]] static std::string calibrationKey(std::span<const BlockMoeWeights *const> blocks,
+                                                  const MoeShape &shape);
 
   // The split of `blocks` (the model's MoE blocks, resident in memory, in the
-  // weight layers' order) with the experts `plan` names: their int8 weights
-  // are requantized here, on the GPU, and the program compiled and loaded.
-  // The wait for the ANE's service ends with ane::Interrupted once
+  // weight layers' order, which outlive it: each application's weights find
+  // their group by their address) with the experts `plan` names: their int8
+  // weights are requantized here, on the GPU, and the program compiled and
+  // loaded. The wait for the ANE's service ends with ane::Interrupted once
   // `interrupted` returns true. Throws std::invalid_argument for a plan the
   // blocks or shapes cannot hold, or an unsupported shape.
-  AneMoe(metal::MetalBackend &backend, std::span<const BlockMoeWeights> blocks, const MoeShape &shape, Plan plan,
-         std::function<bool()> interrupted);
+  AneMoe(metal::MetalBackend &backend, std::span<const BlockMoeWeights *const> blocks, const MoeShape &shape,
+         Plan plan, std::function<bool()> interrupted);
   AneMoe(const AneMoe &) = delete;
   AneMoe &operator=(const AneMoe &) = delete;
 
@@ -208,7 +214,7 @@ private:
   metal::MetalBackend &backend_;
   // The blocks the split was built from, which outlive it: each application's
   // weights find their group here.
-  std::span<const BlockMoeWeights> blocks_;
+  std::vector<const BlockMoeWeights *> blocks_;
   MoeShape shape_;
   Plan plan_;
   std::vector<Group> groups_;

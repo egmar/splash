@@ -4802,6 +4802,23 @@ std::vector<ops::SwiGluProjections> aneFfnLayers(const LoadedModel &model) {
       model.target);
 }
 
+MoeBlocks moeBlocks(const LoadedModel &model) {
+  return std::visit(
+      [&](const auto &weights) {
+        MoeBlocks result;
+        const QwenTargetGeometry geometry = qwenTargetGeometry(weights, model.draft.layout.targetLayerIds());
+        for (const auto &layer : weights.layers) {
+          const ops::BlockMoeWeights *block = qwenMoeBlock(layer);
+          if (!block || block->stream) return MoeBlocks{};
+          result.blocks.push_back(block);
+        }
+        if (result.blocks.empty()) return MoeBlocks{};
+        result.shape = geometry.moeShape();
+        return result;
+      },
+      model.target);
+}
+
 void withPrefillArena(
     MetalBackend &backend, const LoadedModel &model, const ops::ExecutionPlans &operators, kv::Format format,
     const std::function<void(const ops::PrefillFfnBuffers &, const std::array<MetalBuffer, 2> &)> &use) {
@@ -4829,15 +4846,20 @@ ModelMemoryPlan memoryPlanOf(const ModelDescriptor &descriptor, ops::GdnStateFor
 ModelMemoryPlan plannedRuntimeMemory(const LoadedModel &model,
                                      const ops::ExecutionPlans &operators,
                                      kv::Format kvFormat,
-                                     ops::GdnStateFormat stateFormat, StreamedParts parts, uint32_t lanes) {
+                                     ops::GdnStateFormat stateFormat, StreamedParts parts, uint32_t lanes,
+                                     uint32_t aneMoeRows) {
   requireCompatibleModel(model);
-  return memoryPlanOf(model.descriptor, stateFormat, RuntimeGeometry::from(model, kvFormat, stateFormat, parts, lanes),
-                      operators);
+  RuntimeGeometry geometry = RuntimeGeometry::from(model, kvFormat, stateFormat, parts, lanes);
+  // The arenas hold the split's region where the start takes one, as the
+  // model's files planned them.
+  geometry.target.aneMoeRows = aneMoeRows;
+  return memoryPlanOf(model.descriptor, stateFormat, geometry, operators);
 }
 
 ModelMemoryPlan plannedRuntimeMemory(const ModelDescriptor &descriptor, const QwenTargetGeometry &target,
                                      const ops::ExecutionPlans &operators, kv::Format kvFormat,
                                      ops::GdnStateFormat stateFormat, StreamedParts parts, uint32_t lanes) {
+  // The target's own region (QwenTargetGeometry::aneMoeRows) comes with it.
   return memoryPlanOf(
       descriptor, stateFormat,
       RuntimeGeometry::from(descriptor, descriptor.draft, target, kvFormat, stateFormat, parts, lanes), operators);

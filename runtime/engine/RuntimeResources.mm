@@ -10,6 +10,7 @@
 #include "model/ExpertStore.hpp"
 #include "model/ModelSizing.hpp"
 #include "model/RuntimeArenas.hpp"
+#include "ops/AneMoe.hpp"
 #include "model/WeightStore.hpp"
 #include "ops/AneFfnMeasurement.hpp"
 #include "ops/KvSlotFormat.hpp"
@@ -612,7 +613,8 @@ RuntimeResources::RuntimeResources(
     std::unique_ptr<model::QwenStateStorage> stateStorage,
     std::unique_ptr<KvPageTier> kvTier, std::unique_ptr<DiskSpace> diskSpace,
     std::unique_ptr<KvPool> kvPool, std::unique_ptr<engine::Cache> cache,
-    AneFfnStart aneFfn, kv::Format kvFormat, std::string buildId, std::function<bool()> cancelled,
+    AneFfnStart aneFfn, std::unique_ptr<ops::AneMoe> aneMoe, kv::Format kvFormat, std::string buildId,
+    std::function<bool()> cancelled,
     std::unique_ptr<model::KvBlockCache> blockCache,
     std::unique_ptr<model::KvHistoryStream> historyStream, bool spillAlways,
     model::VerifyRows verifyRows)
@@ -625,7 +627,7 @@ RuntimeResources::RuntimeResources(
       kvPages_(std::move(kvPages)),
       stateStorage_(std::move(stateStorage)), kvTier_(std::move(kvTier)),
       diskSpace_(std::move(diskSpace)), kvPool_(std::move(kvPool)),
-      cache_(std::move(cache)), aneFfn_(std::move(aneFfn.split)),
+      cache_(std::move(cache)), aneFfn_(std::move(aneFfn.split)), aneMoe_(std::move(aneMoe)),
       blockCache_(std::move(blockCache)), historyStream_(std::move(historyStream)),
       // The split serves from the start or once set up (finishAneFfn), until
       // the engine ends.
@@ -914,6 +916,12 @@ RuntimeResources::create(const RuntimeResourcesConfig &config,
     // the target's files give its geometry.
     plannedTarget = model::plannedTargetGeometry(*backend, config.modelRoot, config.model,
                                                  streamable.tableBytes ? streamable.tableMinimumBytes : 0, readers);
+    // The prefill MoE's split's region of each step's expert outputs, which
+    // its join writes (ops::AneMoe::regionRows), is the experts and packed
+    // rows the start asked for; the arenas the plan sizes hold it, and the
+    // split built below takes exactly these rows.
+    if (config.aneMoeExperts && config.aneMoeCapacity % ops::AneMoe::kCapacityQuantum == 0)
+      plannedTarget.aneMoeRows = config.aneMoeExperts * config.aneMoeCapacity;
     planArenas(plannedTarget);
     // Refuse a model that cannot fit before loading its weights: beside them
     // the plan needs at least their arenas, the runtime reserves, one lane's
@@ -944,10 +952,12 @@ RuntimeResources::create(const RuntimeResourcesConfig &config,
   model::ModelMemoryPlan modelMemoryPlan, spillModelMemoryPlan;
   const auto planRuntime = [&] {
     modelMemoryPlan = model::plannedRuntimeMemory(loaded, operators, config.kvFormat, config.stateFormat,
-                                                  model::StreamedParts::loaded(loaded), lanes);
+                                                  model::StreamedParts::loaded(loaded), lanes,
+                                                  plannedTarget.aneMoeRows);
     if (kvMaySpill)
       spillModelMemoryPlan = model::plannedRuntimeMemory(loaded, operators, config.kvFormat, config.stateFormat,
-                                                         model::StreamedParts::loaded(loaded, true), lanes);
+                                                         model::StreamedParts::loaded(loaded, true), lanes,
+                                                         plannedTarget.aneMoeRows);
   };
   // Loads the model as loadOptions says, `again` where a store the plan sized
   // is laid out again (below), and plans its runtime memory as it loaded.
@@ -1050,8 +1060,35 @@ RuntimeResources::create(const RuntimeResourcesConfig &config,
     }
     return {std::nullopt, std::move(status)};
   };
-  // The plan with the staging the tier keeps.
-  const auto planMemory = [&](uint64_t aneFfnBytes) { return planWith(stateStagingBytes, aneFfnBytes); };
+  // The prefill MoE's split: a MoE target's blocks, the experts each keeps
+  // on the engine and the packed rows each holds as the start was asked, and
+  // the bytes its resident copies and scratch take, which the plan sets
+  // aside as the dense split's are.
+  const model::MoeBlocks moeSplit =
+      config.aneMoeExperts && config.aneMoeCapacity ? model::moeBlocks(loaded) : model::MoeBlocks{};
+  std::optional<ops::AneMoe::Plan> moePlan;
+  uint64_t aneMoeBytes = 0;
+  if (!moeSplit.blocks.empty()) {
+    const std::vector<ops::MoeShape> shapes(moeSplit.blocks.size(), moeSplit.shape);
+    const ops::AneMoe::Selection selection{.experts = config.aneMoeExperts,
+                                           .capacity = config.aneMoeCapacity % ops::AneMoe::kCapacityQuantum
+                                                           ? 0
+                                                           : config.aneMoeCapacity};
+    if (selection.empty())
+      throw RuntimeResourcesError(RuntimeResourceStage::Configuration,
+                                  "the Neural Engine MoE split's capacity is not whole quanta of " +
+                                      std::to_string(ops::AneMoe::kCapacityQuantum) + " rows", {});
+    const ops::AneMoe::Plan plan = ops::AneMoe::plan(shapes, {}, selection);
+    if (plan.rows() != plannedTarget.aneMoeRows)
+      throw std::logic_error("the Neural Engine MoE split's rows are not the arena's region");
+    aneMoeBytes = ops::AneMoe::plannedBytes(moeSplit.shape, plan, static_cast<uint32_t>(moeSplit.blocks.size()));
+    moePlan = plan;
+  }
+  // The plan with the staging the tier keeps, and both Neural Engine splits'
+  // bytes set aside.
+  const auto planMemory = [&](uint64_t aneFfnBytes) {
+    return planWith(stateStagingBytes, aneFfnBytes + aneMoeBytes);
+  };
 
   // The model's side of the split (startAneFfn).
   AneFfnModel splitModel;
@@ -1346,13 +1383,28 @@ RuntimeResources::create(const RuntimeResourcesConfig &config,
           "base Metal allocation exceeds immutable hard budget");
     }
 
+    // The MoE split's resident copies, requantized and compiled here, before
+    // the runtime whose step scratch its region sizes. One that does not come
+    // up leaves the GPU the blocks' MoE.
+    std::unique_ptr<ops::AneMoe> aneMoe;
+    if (moePlan) {
+      try {
+        aneMoe = std::make_unique<ops::AneMoe>(*backend, moeSplit.blocks, moeSplit.shape, *moePlan,
+                                               config.cancelled);
+        logLine("Neural Engine MoE split: ", moePlan->experts, " experts of ", moePlan->capacity,
+                " packed rows a block, ", moeSplit.blocks.size(), " blocks, ",
+                std::fixed, std::setprecision(2), static_cast<double>(aneMoeBytes) / (1 << 20), " MiB.");
+      } catch (const std::exception &error) {
+        logWarning("Neural Engine MoE split not taken: ", error.what());
+      }
+    }
     auto result = std::unique_ptr<RuntimeResources>(new RuntimeResources(
         std::move(disk.persistent), std::move(backend), std::move(readers), std::move(loaded),
         std::move(operators), std::move(memoryPlan), std::move(cacheIdentity),
         std::move(memoryGovernor), startClaim, std::move(startScope), std::move(kvPages), std::move(stateStorage),
         std::move(kvTier), std::move(disk.space), std::move(kvPool), std::move(cache),
-        std::move(aneFfn), config.kvFormat, config.buildId, config.cancelled, std::move(blockCache),
-        std::move(historyStream), config.kvSpillAlways, config.verifyRows));
+        std::move(aneFfn), std::move(aneMoe), config.kvFormat, config.buildId, config.cancelled,
+        std::move(blockCache), std::move(historyStream), config.kvSpillAlways, config.verifyRows));
     result->adoptPersistentCache();
     return result;
   } catch (const RuntimeResourcesError &) {
@@ -1480,7 +1532,7 @@ model::RuntimeContext RuntimeResources::modelContext() {
   // A start's measured step costs stay beside the split's calibrations.
   const std::string key =
       model::stepCostsKey(model_, *kvPages_, *stateStorage_, operators_, *backend_, cacheIdentity_.buildId);
-  return {*backend_, model_, *kvPages_, *stateStorage_, operators_, aneFfn_.get(), nullptr, blockCache_.get(),
+  return {*backend_, model_, *kvPages_, *stateStorage_, operators_, aneFfn_.get(), aneMoe_.get(), blockCache_.get(),
           historyStream_.get(), verifyRows_, [key](uint32_t lanes) { return ane::recall(key + std::to_string(lanes)); },
           [key](uint32_t lanes, std::string_view line) { ane::remember(key + std::to_string(lanes), line); },
           [key](uint32_t lanes) { ane::forget(key + std::to_string(lanes)); },
@@ -1559,7 +1611,9 @@ ActualMemoryReport RuntimeResources::actualMemoryReport(
     report.spilledKvTableBytes += staging.tableBytes;
   }
   report.stateStagingBytes = modelMemory.stateStagingBytes;
-  report.aneFfnBytes = aneFfn_ ? aneFfn_->allocatedBytes() : 0;
+  // Both Neural Engine splits' own memory, which the plan sets aside as one
+  // quantity (planWith's aneFfnBytes); a model runs one of them.
+  report.aneFfnBytes = (aneFfn_ ? aneFfn_->allocatedBytes() : 0) + (aneMoe_ ? aneMoe_->allocatedBytes() : 0);
   if (const auto table = streamedTableStats()) report.streamedTableBytes = table->cacheBytes;
   // Optional warmup may end with a rolled-back allocation and no subsequent
   // command. Refresh the current counts after that rollback; peaks stay intact.

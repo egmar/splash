@@ -1,5 +1,6 @@
 #pragma once
 
+#include "ops/AneMoe.hpp"
 #include "ops/Vision.hpp"
 #include "engine/AneFfnStartup.hpp"
 #include "engine/MemoryPlan.hpp"
@@ -176,6 +177,11 @@ struct RuntimeResourcesConfig {
   // --disable-ane, and a benchmark round runs the split of the first so that
   // rounds repeat one another.
   AneFfnSetting aneFfn;
+  // The prefill MoE's Neural Engine split of a MoE target (ops::AneMoe), from
+  // a dev tool's flags: the experts each block keeps on the engine and the
+  // packed rows each holds, which its resident int8 copies and its group take
+  // (ops::AneMoe::plannedBytes). Off when either is 0.
+  uint32_t aneMoeExperts = 0, aneMoeCapacity = 0;
   // A relaunch's context (--relaunch-context): the context the server's
   // first engine served, which the server passes to its relaunches. The
   // relaunch decides the rest as that engine did, for --max-context or as
@@ -381,7 +387,8 @@ private:
                    std::unique_ptr<DiskSpace> diskSpace,
                    std::unique_ptr<KvPool> kvPool,
                    std::unique_ptr<engine::Cache> cache,
-                   AneFfnStart aneFfn, kv::Format kvFormat, std::string buildId, std::function<bool()> cancelled,
+                   AneFfnStart aneFfn, std::unique_ptr<ops::AneMoe> aneMoe, kv::Format kvFormat,
+                   std::string buildId, std::function<bool()> cancelled,
                    std::unique_ptr<model::KvBlockCache> blockCache,
                    std::unique_ptr<model::KvHistoryStream> historyStream, bool spillAlways,
                    model::VerifyRows verifyRows);
@@ -412,6 +419,9 @@ private:
   std::unique_ptr<KvPool> kvPool_;
   std::unique_ptr<engine::Cache> cache_;
   std::unique_ptr<ops::AneFfn> aneFfn_;
+  // The prefill MoE's split, built before the runtime whose step scratch its
+  // region sizes (model::moeBlocks, RuntimeContext::aneMoe).
+  std::unique_ptr<ops::AneMoe> aneMoe_;
   // A spill-capable target's readers of its spilled KV; none for another.
   std::unique_ptr<model::KvBlockCache> blockCache_;
   std::unique_ptr<model::KvHistoryStream> historyStream_;

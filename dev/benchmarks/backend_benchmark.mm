@@ -816,6 +816,15 @@ double parseAneFfnShare(std::string_view value) {
   return share;
 }
 
+// A count an option takes: --ane-moe-experts and --ane-moe-capacity.
+uint32_t parseCount(std::string_view value, std::string_view option) {
+  uint32_t count = 0;
+  const auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), count);
+  if (error != std::errc{} || end != value.data() + value.size() || !count)
+    throw std::invalid_argument(std::string(option) + " takes a count of one or more");
+  return count;
+}
+
 double median(std::vector<double> values) {
   if (values.empty())
     throw std::invalid_argument("cannot take the median of no samples");
@@ -951,7 +960,8 @@ int main(int argc, char **argv) {
       std::cerr << "usage: backend-benchmark METALLIB MODEL_ROOT "
                    "[--samples COUNT] [--progress PATH] "
                    "[--scenario NAME[,NAME...]] [--ane-ffn-share SHARE "
-                   "[--ane-ffn-minimum-rows ROWS]] [--ane-calibration again] [--max-context TOKENS] "
+                   "[--ane-ffn-minimum-rows ROWS]] [--ane-calibration again] "
+                   "[--ane-moe-experts COUNT --ane-moe-capacity ROWS] [--max-context TOKENS] "
                    "[--activations auto|bf16] [--verify-rows all|auto] "
                    "[--logits DIR [--logits-from DIR] [--logits-width LANES] [--logits-cache evict|keep]] "
                    "[--context-lengths TOKENS[,TOKENS...]] [--short-idle SECONDS]\n"
@@ -989,6 +999,7 @@ int main(int argc, char **argv) {
     std::optional<std::filesystem::path> progressPath;
     std::optional<double> aneFfnShare;
     std::optional<uint32_t> aneFfnMinimumRows;
+    std::optional<uint32_t> aneMoeExperts, aneMoeCapacity;
     bool recalibrateAne = false;
     std::vector<uint32_t> contextLengths{2048, 10000, 50000, 128000};
     uint32_t maxContext = 0;
@@ -1016,6 +1027,13 @@ int main(int argc, char **argv) {
         recalibrateAne = true;
       } else if (option == "--ane-ffn-minimum-rows") {
         aneFfnMinimumRows = parseAneFfnMinimumRows(argv[index + 1]);
+      } else if (option == "--ane-moe-experts") {
+        aneMoeExperts = parseCount(argv[index + 1], "--ane-moe-experts");
+      } else if (option == "--ane-moe-capacity") {
+        aneMoeCapacity = parseCount(argv[index + 1], "--ane-moe-capacity");
+        if (*aneMoeCapacity % ops::AneMoe::kCapacityQuantum)
+          throw std::invalid_argument("--ane-moe-capacity takes whole quanta of " +
+                                      std::to_string(ops::AneMoe::kCapacityQuantum) + " rows");
       } else if (option == "--max-context") {
         maxContext = parseMaxContext(argv[index + 1]);
       } else if (option == "--activations") {
@@ -1063,6 +1081,11 @@ int main(int argc, char **argv) {
     config.model = model::servedFor(model::inspectModelRoot(config.modelRoot), maxContext);
     config.buildId = SPLASH_BUILD_ID;
     config.aneFfn = engine::AneFfnSetting::fromGiven(aneFfnShare, aneFfnMinimumRows);
+    // The MoE split takes both settings or neither (ops::AneMoe's plan).
+    if (aneMoeExperts.has_value() != aneMoeCapacity.has_value())
+      throw std::invalid_argument("--ane-moe-experts and --ane-moe-capacity go together");
+    config.aneMoeExperts = aneMoeExperts.value_or(0);
+    config.aneMoeCapacity = aneMoeCapacity.value_or(0);
     config.aneFfn.recalibrate = recalibrateAne;
     config.int8Activations = int8Activations;
     config.verifyRows = verifyRows;
