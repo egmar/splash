@@ -55,6 +55,7 @@ struct Options final {
   uint32_t rows = 0;
   uint64_t seed = 41;
   double seconds = 10.0;
+  uint32_t minimumGraphRows = 512;
   std::string routes;
 };
 
@@ -603,7 +604,7 @@ void check(metal::MetalBackend &backend, const Options &options) {
   // and the exact fallback carries their remaining routes.
   const Chunk routes = makeRoutes(1024, dims.experts, dims.topK, 3001);
   const Planner planner = Planner::calibrate(calibration,
-                                              Config{options.groupSize, 32, options.maxCapacity, 0.95, 512});
+                                              Config{options.groupSize, 32, options.maxCapacity, 0.95, options.minimumGraphRows});
   const InputBatch input = makeInput(routes.rows, dims.hidden, 991);
   const std::vector<ExpertWeights> weights = makeWeights(backend, dims, 717);
   GraphCache graphs(dims);
@@ -635,32 +636,38 @@ void sweep(metal::MetalBackend &backend) {
   uint64_t eventValue = 0;
   std::printf("sweep: Inkling dimensions H=%u I=%u; timings include IOSurface binding and ANE evaluation, not weight generation\n",
               dims.hidden, dims.intermediate);
+  // The floor: which group shapes the ANE compiles and runs at all. Production
+  // AneFfn never goes below 512 rows (kMinimumRows), so smaller graphs are
+  // measured here rather than assumed.
   for (uint32_t groups : {1u, 2u, 4u}) {
-    const uint32_t minimumCapacity = 512 / groups;
-    for (uint32_t capacity : {minimumCapacity, minimumCapacity * 2}) {
+    for (uint32_t capacity : {32u, 64u, 128u, 256u, 512u, 1024u}) {
       const uint32_t rows = groups * capacity;
-      const InputBatch input = makeInput(rows, dims.hidden, uint64_t{groups} * 1000 + capacity);
-      PackedGroup group;
-      group.capacity = capacity;
-      for (uint32_t slot = 0; slot < groups; ++slot) {
-        group.experts.push_back(slot);
-        for (uint32_t row = 0; row < capacity; ++row) {
-          const uint32_t token = slot * capacity + row;
-          group.rows.push_back({token, token, slot, 0, row});
+      try {
+        const InputBatch input = makeInput(rows, dims.hidden, uint64_t{groups} * 1000 + capacity);
+        PackedGroup group;
+        group.capacity = capacity;
+        for (uint32_t slot = 0; slot < groups; ++slot) {
+          group.experts.push_back(slot);
+          for (uint32_t row = 0; row < capacity; ++row) {
+            const uint32_t token = slot * capacity + row;
+            group.rows.push_back({token, token, slot, 0, row});
+          }
         }
+        Graph &graph = graphs.get(groups, capacity);
+        double bestMs = 1e30;
+        for (int repeat = 0; repeat < 4; ++repeat) {
+          GroupWork work = prepareGroup(backend, graph, group, input, weights, dims.hidden);
+          const auto start = Clock::now();
+          graph.evaluate(*work.binding, event, eventValue);
+          const double elapsedMs = Seconds(Clock::now() - start).count() * 1e3;
+          if (repeat) bestMs = std::min(bestMs, elapsedMs);
+        }
+        const double flops = 2.0 * groups * capacity * dims.hidden * dims.intermediate * 3.0;
+        std::printf("sweep: G=%u C=%u rows=%u best=%.2f ms useful=100%% padded=0%% throughput=%.3f TFLOP/s\n",
+                    groups, capacity, rows, bestMs, flops / (bestMs * 1e9));
+      } catch (const std::exception &error) {
+        std::printf("sweep: G=%u C=%u rows=%u REJECTED %s\n", groups, capacity, rows, error.what());
       }
-      Graph &graph = graphs.get(groups, capacity);
-      double bestMs = 1e30;
-      for (int repeat = 0; repeat < 4; ++repeat) {
-        GroupWork work = prepareGroup(backend, graph, group, input, weights, dims.hidden);
-        const auto start = Clock::now();
-        graph.evaluate(*work.binding, event, eventValue);
-        const double elapsedMs = Seconds(Clock::now() - start).count() * 1e3;
-        if (repeat) bestMs = std::min(bestMs, elapsedMs);
-      }
-      const double flops = 2.0 * groups * capacity * dims.hidden * dims.intermediate * 3.0;
-      std::printf("sweep: G=%u C=%u rows=%u best=%.2f ms useful=100%% padded=0%% throughput=%.3f TFLOP/s\n",
-                  groups, capacity, rows, bestMs, flops / (bestMs * 1e9));
     }
   }
 }
@@ -733,7 +740,7 @@ void layer(metal::MetalBackend &backend, const Options &options) {
       std::vector<Chunk> localCalibration{makeRoutes(rows, dims.experts, dims.topK, options.seed + rows),
                                            makeRoutes(rows, dims.experts, dims.topK, options.seed + rows + 1)};
       const Planner localPlan = Planner::calibrate(localCalibration,
-                                                    Config{options.groupSize, 32, options.maxCapacity, 0.95, 512});
+                                                    Config{options.groupSize, 32, options.maxCapacity, 0.95, options.minimumGraphRows});
       const Chunk evalRoutes = makeRoutes(rows, dims.experts, dims.topK, options.seed + rows + 2);
       const InputBatch input = makeInput(rows, dims.hidden, options.seed + rows + 3);
       const LayerResult result = runLayer(backend, graphs, localPlan, evalRoutes, input, weights, dims, event, eventValue, false);
@@ -751,7 +758,7 @@ void layer(metal::MetalBackend &backend, const Options &options) {
   }
 
   const Planner planner = Planner::calibrate(calibration,
-                                              Config{options.groupSize, 32, options.maxCapacity, 0.95, 512});
+                                              Config{options.groupSize, 32, options.maxCapacity, 0.95, options.minimumGraphRows});
   for (const Chunk &routes : evaluations) {
     const InputBatch input = makeInput(routes.rows, dims.hidden, options.seed + routes.rows + 3);
     const std::vector<ExpertWeights> weights = makeWeights(backend, dims, options.seed + 73);
@@ -785,6 +792,7 @@ Options parseOptions(int argc, char **argv, int begin) {
     else if (name == "group-size") options.groupSize = std::stoul(value);
     else if (name == "max-capacity") options.maxCapacity = std::stoul(value);
     else if (name == "rows") options.rows = std::stoul(value);
+    else if (name == "min-rows") options.minimumGraphRows = std::stoul(value);
     else if (name == "seed") options.seed = std::stoull(value);
     else if (name == "routes") options.routes = value;
     else if (name == "seconds") options.seconds = std::stod(value);
