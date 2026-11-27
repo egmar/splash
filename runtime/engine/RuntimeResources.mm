@@ -1480,7 +1480,7 @@ model::RuntimeContext RuntimeResources::modelContext() {
   // A start's measured step costs stay beside the split's calibrations.
   const std::string key =
       model::stepCostsKey(model_, *kvPages_, *stateStorage_, operators_, *backend_, cacheIdentity_.buildId);
-  return {*backend_, model_, *kvPages_, *stateStorage_, operators_, aneFfn_.get(), blockCache_.get(),
+  return {*backend_, model_, *kvPages_, *stateStorage_, operators_, aneFfn_.get(), nullptr, blockCache_.get(),
           historyStream_.get(), verifyRows_, [key](uint32_t lanes) { return ane::recall(key + std::to_string(lanes)); },
           [key](uint32_t lanes, std::string_view line) { ane::remember(key + std::to_string(lanes), line); },
           [key](uint32_t lanes) { ane::forget(key + std::to_string(lanes)); },

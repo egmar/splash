@@ -42,7 +42,8 @@ public:
   [[nodiscard]] std::vector<metal::MetalBuffer> addPrefill(metal::CommandGraph &graph,
                                                            std::span<const QwenTargetPrefillChunk> chunks,
                                                            const kv::PageStorage &kv, SpilledKvReads &spilled,
-                                                           QwenPrefillLayers layers, ops::AneFfn *aneFfn) override;
+                                                           QwenPrefillLayers layers, ops::AneFfn *aneFfn,
+                                                           ops::AneMoe *aneMoe) override;
   // The hidden rows are the output norm of the final mix, which the head
   // reads as they are; its logits take the family's finish.
   void addHeadBatch(metal::CommandGraph &graph, metal::MetalBuffer hidden, metal::MetalBuffer finalHidden,

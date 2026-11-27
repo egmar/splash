@@ -81,7 +81,8 @@ TargetRows prefillTargetRows(const RuntimeGeometry &geometry, const ops::Executi
                    .attention = attentionWorkspace(geometry, operators, ops::StepKind::Prefill),
                    .moe = {}};
   if (target.ffnKind == QwenFfnKind::SparseMoe)
-    shape.moe = operators.moeWorkspace(target.moeShape(), target.moeRouterFormat, kPrefillRows, ops::StepKind::Prefill);
+    shape.moe = operators.moeWorkspace(target.moeShape(), target.moeRouterFormat, kPrefillRows,
+                                       ops::StepKind::Prefill, target.aneMoeRows);
   return shape;
 }
 

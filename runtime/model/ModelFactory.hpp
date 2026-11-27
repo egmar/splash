@@ -128,6 +128,11 @@ struct RuntimeContext final {
   const ops::ExecutionPlans &operators;
   // The prefill FFN's Neural Engine split (engine::startAneFfn), if any.
   ops::AneFfn *aneFfn = nullptr;
+  // The prefill MoE's Neural Engine split, if any: it holds its blocks'
+  // hottest experts' int8 copies, and a command it takes leaves the GPU the
+  // rest of the block's routes (ops::AneMoe). Its region of the step's expert
+  // outputs is in the geometry (QwenTargetGeometry::aneMoeRows).
+  ops::AneMoe *aneMoe = nullptr;
   // The readers of a spill-capable target's spilled K/V, both or neither:
   // the hot block cache its verifies resolve through, and the stream of its
   // prefills' history (StreamedParts::kv).

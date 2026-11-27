@@ -31,6 +31,7 @@ class MetalBuffer;
 } // namespace metal
 namespace ops {
 class AneFfn;
+class AneMoe;
 struct PrefillFfnBuffers;
 } // namespace ops
 
@@ -1032,6 +1033,10 @@ public:
   // (commandLimits()); none for the GPU alone. A runtime without a dense
   // target's prefill ignores it.
   virtual void setAneFfn(ops::AneFfn *split) { static_cast<void>(split); }
+  // The prefill MoE's Neural Engine split the runtime's next commands take,
+  // set between commands; none for the GPU alone. A runtime whose target
+  // runs another FFN ignores it.
+  virtual void setAneMoe(ops::AneMoe *split) { static_cast<void>(split); }
   // Runs `use` between commands on the runtime's own prefill buffers of a
   // dense FFN and the hidden rows its layers alternate between, which `use`
   // may overwrite: the split's set-up. Throws for a runtime without them.

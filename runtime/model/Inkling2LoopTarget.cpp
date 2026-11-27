@@ -2,6 +2,7 @@
 
 #include "model/Inkling2Loop.hpp"
 #include "ops/AneFfn.hpp"
+#include "ops/AneMoe.hpp"
 #include "ops/BlockResidualMix.hpp"
 #include "ops/MessageGate.hpp"
 #include "ops/Normalization.hpp"
@@ -80,8 +81,9 @@ QwenTargetScratchBytes Inkling2LoopTarget::allocatedScratchBytes() const noexcep
 std::vector<metal::MetalBuffer> Inkling2LoopTarget::addPrefill(metal::CommandGraph &graph,
                                                                std::span<const QwenTargetPrefillChunk> chunks,
                                                                const kv::PageStorage &kv, SpilledKvReads &spilled,
-                                                               QwenPrefillLayers layers, ops::AneFfn *aneFfn) {
-  std::vector<PrefillStep> steps = prefillSteps<PrefillStep>(graph, chunks, kv, spilled, layers, aneFfn);
+                                                               QwenPrefillLayers layers, ops::AneFfn *aneFfn,
+                                                               ops::AneMoe *aneMoe) {
+  std::vector<PrefillStep> steps = prefillSteps<PrefillStep>(graph, chunks, kv, spilled, layers, aneFfn, aneMoe);
   for (uint32_t index = 0; index < steps.size(); ++index) {
     PrefillStep &step = steps[index];
     step.scratch = step.decode ? steps_.verifyScratch() : steps_.prefillScratch(index);
@@ -194,7 +196,7 @@ void Inkling2LoopTarget::addPrefillLayer(PrefillStep &step, uint32_t application
   step.ffn.residual = s.zeros;
   step.ffn.output = b.attentionOutput;
   step.ffn.scratch = b.moe;
-  ops::MoE::addRouting(step.graph, step.ffn, layer.ffn, *step.moe);
+  ops::MoE::addRouting(step.graph, step.ffn, layer.ffn, *step.moe, step.aneMoe);
 }
 
 // Layer 0 reads its input itself; a sliding layer one mix of it, which its
@@ -428,10 +430,10 @@ void Inkling2LoopTarget::addPrefillExperts(PrefillStep &step, uint32_t applicati
         .rows = step.layoutRows,
         .tree = d->tree,
         .tape = step.scratch.tape};
-    ops::MoE::addRouted(step.graph, step.ffn, layer.ffn, *step.moe, &combined);
+    ops::MoE::addRouted(step.graph, step.ffn, layer.ffn, *step.moe, &combined, step.aneMoe);
     return;
   }
-  ops::MoE::addRouted(step.graph, step.ffn, layer.ffn, *step.moe);
+  ops::MoE::addRouted(step.graph, step.ffn, layer.ffn, *step.moe, nullptr, step.aneMoe);
   addConvolution(step, application, Inkling2LoopConvolution::Ffn, convolution, shape,
                  ops::ShortConvOutput::RoundedSum);
 }

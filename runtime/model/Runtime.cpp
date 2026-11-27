@@ -21,6 +21,7 @@
 
 #include "metal/CommandGraph.hpp"
 #include "ops/AneFfn.hpp"
+#include "ops/AneMoe.hpp"
 #include "ops/Linear.hpp"
 #include "ops/PagedAttention.hpp"
 #include "ops/PagedKv.hpp"
@@ -587,6 +588,9 @@ struct Runtime::Impl {
   // cycles teach under --verify-rows auto, greedy and sampled lanes apart.
   LookupAcceptance lookupAcceptance;
   ops::AneFfn *aneFfn;
+  // The prefill MoE's Neural Engine split, which the command's MoE work marks
+  // and joins (ops::AneMoe); none where the model runs its MoE on the GPU.
+  ops::AneMoe *aneMoe;
   // The readers of spilled K/V, when the target's K/V spills.
   KvBlockCache *blockCache;
   KvHistoryStream *historyStream;
@@ -743,8 +747,15 @@ struct Runtime::Impl {
   explicit Impl(RuntimeContext value)
       : backend(value.backend),
         model(value.model),
-        geometry(RuntimeGeometry::from(value.model, value.kvPages.layout().format, value.stateStorage.layout().target,
-                                       StreamedParts::loaded(value.model, value.blockCache != nullptr), value.lanes)),
+        geometry([&value] {
+          RuntimeGeometry geometry =
+              RuntimeGeometry::from(value.model, value.kvPages.layout().format, value.stateStorage.layout().target,
+                                    StreamedParts::loaded(value.model, value.blockCache != nullptr), value.lanes);
+          // The split's region of each step's expert outputs, which the step
+          // scratch is sized for and the plans of a step it takes hold.
+          geometry.target.aneMoeRows = value.aneMoe ? value.aneMoe->regionRows() : 0;
+          return geometry;
+        }()),
         operators(value.operators),
         kvPages(value.kvPages),
         states(value.stateStorage),
@@ -757,7 +768,8 @@ struct Runtime::Impl {
                         value.model.target)),
         draftModel(value.model.draft, value.backend, operators, targetModel->vocabularyProjection(),
                    geometry.target.draftVocabulary, geometry.target.logitFinish()),
-        aneFfn(value.aneFfn), blockCache(value.blockCache), historyStream(value.historyStream),
+        aneFfn(value.aneFfn), aneMoe(value.aneMoe), blockCache(value.blockCache),
+        historyStream(value.historyStream),
         limits(splash::model::commandLimits(geometry, aneFfn ? aneFfn->minimumRows() : 0)) {
     if (states.layout() != model.stateLayout(states.layout().target.format, states.layout().target.cachedCodes) ||
         kvPages.layout() != model.targetKvLayout(kvPages.layout().format) || !blockCache != !historyStream) {
@@ -2368,7 +2380,7 @@ struct Runtime::Impl {
       model.sequences = sequences[c];
     }
     const std::vector<MetalBuffer> finalHidden =
-        targetModel->addPrefill(graph, modelChunks, kvPages, reads, layers, aneFfn);
+        targetModel->addPrefill(graph, modelChunks, kvPages, reads, layers, aneFfn, aneMoe);
     for (uint32_t c = 0; ends && c < chunks.size(); ++c) addDraftContext(graph, chunks, c);
 
     PrefillOutputs outputs;
@@ -3704,12 +3716,13 @@ Runtime::prefillAsync(const BatchPlan &plan,
   for (uint32_t lane = 0; begins && lane < items.size(); ++lane)
     impl_->request(items[lane].requestId).unreadableBlocks.clear();
   CommandGraph graph;
-  if (impl_->aneFfn) {
+  if (impl_->aneFfn || impl_->aneMoe) {
     for (uint32_t lane = 0; lane < items.size(); ++lane)
       draws[lane] = impl_->request(items[lane].requestId).rngCounter;
     uint32_t rows = 0;
     for (const ModelBatchItem &item : items) rows += item.tokenCount;
-    impl_->aneFfn->begin(impl_->aneFfn->steps(rows));
+    if (impl_->aneFfn) impl_->aneFfn->begin(impl_->aneFfn->steps(rows));
+    if (impl_->aneMoe) impl_->aneMoe->begin(rows);
   }
   const std::shared_ptr<SpilledKvReads> reads = impl_->prefillReads(items, layers);
   CommandGraph encodes;
@@ -3747,7 +3760,9 @@ Runtime::prefillAsync(const BatchPlan &plan,
     // the first run could not read. The first ticket was released before
     // this completion runs (DeferredMetalTicket::wait), so the backend takes
     // the rerun's command, whose time counts in the chunk's.
-    if (impl->aneFfn && !impl->aneFfn->finish(timing)) {
+    // A MoE target's split is the other way the command's Neural Engine work
+    // fails; a model has one of the two.
+    if ((impl->aneFfn && !impl->aneFfn->finish(timing)) || (impl->aneMoe && !impl->aneMoe->finish(timing))) {
       for (uint32_t lane = 0; lane < items.size(); ++lane)
         entries[lane]->rngCounter = draws[lane];
       reads->end();
@@ -3934,8 +3949,9 @@ Runtime::prefillAsync(const BatchPlan &plan,
   };
   const auto submit = [impl, graph = std::make_shared<CommandGraph>(std::move(graph)),
                        completion](const CommandTiming &) {
-    return impl->aneFfn ? impl->aneFfn->commit(*graph, completion)
-                        : impl->backend.submitCommandAsync(graph->command(), completion);
+    if (impl->aneFfn) return impl->aneFfn->commit(*graph, completion);
+    if (impl->aneMoe) return impl->aneMoe->commit(*graph, completion);
+    return impl->backend.submitCommandAsync(graph->command(), completion);
   };
   std::array<PrefillLane, kLaneCount> lanes{};
   for (uint32_t lane = 0; lane < items.size(); ++lane)
@@ -4746,6 +4762,8 @@ void Runtime::setAneFfn(ops::AneFfn *split) {
   impl_->aneFfn = split;
   impl_->limits = splash::model::commandLimits(impl_->geometry, split ? split->minimumRows() : 0);
 }
+
+void Runtime::setAneMoe(ops::AneMoe *split) { impl_->aneMoe = split; }
 
 void Runtime::withPrefillFfn(const PrefillFfnUse &use) {
   const QwenTargetPrefillBuffers buffers = prefillBuffers(*impl_->prefillArena, 0);

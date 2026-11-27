@@ -32,7 +32,8 @@ public:
   [[nodiscard]] std::vector<metal::MetalBuffer> addPrefill(metal::CommandGraph &graph,
                                                            std::span<const QwenTargetPrefillChunk> chunks,
                                                            const kv::PageStorage &kv, SpilledKvReads &spilled,
-                                                           QwenPrefillLayers layers, ops::AneFfn *aneFfn) override;
+                                                           QwenPrefillLayers layers, ops::AneFfn *aneFfn,
+                                                           ops::AneMoe *aneMoe) override;
   void addInsideCapture(metal::CommandGraph &graph, metal::MetalBuffer auxiliaryIn,
                         metal::MetalBuffer captured) const override;
   void prepareVerifyLane(uint32_t lane, uint64_t position, const QwenTargetRequest &request) override;

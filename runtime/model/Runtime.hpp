@@ -78,6 +78,7 @@ public:
   [[nodiscard]] ModelTelemetry
   telemetry() const noexcept override;
   void setAneFfn(ops::AneFfn *split) override;
+  void setAneMoe(ops::AneMoe *split) override;
   void withPrefillFfn(const PrefillFfnUse &use) override;
 
 private:

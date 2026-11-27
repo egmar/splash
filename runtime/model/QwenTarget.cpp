@@ -5,6 +5,7 @@
 #include "model/Qwen3_8.hpp"
 #include "model/WeightStore.hpp"
 #include "ops/AneFfn.hpp"
+#include "ops/AneMoe.hpp"
 #include "ops/Embedding.hpp"
 #include "ops/LogitFinish.hpp"
 #include "ops/Normalization.hpp"
@@ -166,9 +167,14 @@ ops::AneFfn *QwenTarget::splitOf(std::span<const QwenTargetPrefillChunk> chunks,
   return aneFfn;
 }
 
+ops::AneMoe *QwenTarget::aneMoeOf(std::span<const QwenTargetPrefillChunk> chunks, ops::AneMoe *aneMoe) const {
+  if (!aneMoe || chunks.size() != 1 || !aneMoe->splits(chunks.front().rows)) return nullptr;
+  return aneMoe;
+}
+
 QwenTarget::PrefillStep QwenTarget::prefillStep(metal::CommandGraph &graph, const QwenTargetPrefillChunk &chunk,
                                                 const kv::PageStorage &kv, SpilledKvReads &spilled,
-                                                ops::AneFfn *aneFfn) const {
+                                                ops::AneFfn *aneFfn, ops::AneMoe *aneMoe) const {
   if (chunk.sequences.empty() || chunk.sequences.size() > ExecutionLimits::maximumBatchWidth || !chunk.rows ||
       chunk.rows > ExecutionLimits::prefillTokenBudget)
     throw std::invalid_argument("invalid Qwen prefill chunk");
@@ -185,10 +191,14 @@ QwenTarget::PrefillStep QwenTarget::prefillStep(metal::CommandGraph &graph, cons
     step.chunks[index] = sequence.chunk;
     step.pageTables[index] = sequence.pageTable;
   }
+  // A split's region is in the step's expert outputs only where the split
+  // takes the step; a decode step never does.
+  const uint32_t aneRows = aneMoe && !chunk.decode ? geometry_.aneMoeRows : 0;
   if (geometry_.ffnKind == QwenFfnKind::SparseMoe)
     step.moe = operators_.moe(geometry_.moeShape(), geometry_.moeRouterFormat, chunk.rows,
-                              chunk.decode ? ops::StepKind::Decode : ops::StepKind::Prefill);
+                              chunk.decode ? ops::StepKind::Decode : ops::StepKind::Prefill, aneRows);
   step.aneFfn = aneFfn;
+  step.aneMoe = aneMoe;
   return step;
 }
 
@@ -217,7 +227,8 @@ void QwenTarget::planOutputRows(PrefillStep &step, uint32_t index) const {
   for (const QwenTargetPrefillSequence &sequence : step.sequences)
     step.readRows.push_back(sequence.rowBegin + sequence.rows - 1);
   if (step.moe)
-    step.moe = operators_.moe(geometry_.moeShape(), geometry_.moeRouterFormat, step.outputRows(), ops::StepKind::Prefill);
+    step.moe = operators_.moe(geometry_.moeShape(), geometry_.moeRouterFormat, step.outputRows(),
+                              ops::StepKind::Prefill, step.aneMoe ? geometry_.aneMoeRows : 0);
 }
 
 void QwenTarget::addReadRows(const PrefillStep &step, const metal::MetalBuffer &compact,
@@ -410,7 +421,7 @@ void QwenTarget::addPrefillMoeRouting(PrefillStep &step, const ops::NormWeights 
     step.ffn.lanes = d->step.lanes;
     step.ffn.laneRows = b.laneRows;
   }
-  ops::MoE::addRouting(step.graph, step.ffn, ffn, *step.moe);
+  ops::MoE::addRouting(step.graph, step.ffn, ffn, *step.moe, step.aneMoe);
 }
 
 void QwenTarget::addNormalizedHead(metal::CommandGraph &graph, const ops::Linear &linear,
@@ -505,8 +516,9 @@ public:
 
   std::vector<metal::MetalBuffer> addPrefill(metal::CommandGraph &graph, std::span<const QwenTargetPrefillChunk> chunks,
                                              const kv::PageStorage &kv, SpilledKvReads &spilled,
-                                             QwenPrefillLayers layers, ops::AneFfn *aneFfn) override {
-    std::vector<PrefillStep> steps = prefillSteps(graph, chunks, kv, spilled, layers, aneFfn);
+                                             QwenPrefillLayers layers, ops::AneFfn *aneFfn,
+                                             ops::AneMoe *aneMoe) override {
+    std::vector<PrefillStep> steps = prefillSteps(graph, chunks, kv, spilled, layers, aneFfn, aneMoe);
     for (PrefillStep &step : steps) planAttention(step);
     return addPrefillLayers(std::span(steps), *this, layers);
   }
@@ -548,7 +560,8 @@ private:
   [[nodiscard]] const ops::BlockMoeWeights *moe(uint32_t index) const { return qwenMoeBlock(weights_.layers[index]); }
   void addPrefillExperts(PrefillStep &step, uint32_t index) const {
     const QwenTargetPrefillBuffers &b = step.buffers;
-    if (const ops::BlockMoeWeights *ffn = moe(index)) ops::MoE::addRouted(step.graph, step.ffn, *ffn, *step.moe);
+    if (const ops::BlockMoeWeights *ffn = moe(index))
+      ops::MoE::addRouted(step.graph, step.ffn, *ffn, *step.moe, nullptr, step.aneMoe);
     addReadRows(step, b.hidden[index & 1], b.hidden[(index & 1) ^ 1]);
     // The draft reads its layers' output rows.
     addDraftCapture(step, index, b.hidden[(index & 1) ^ 1]);

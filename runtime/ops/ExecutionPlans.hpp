@@ -77,7 +77,7 @@ public:
   // The plan of `rows` rows of `step`'s work through a MoE target's blocks,
   // whose routers are in `routerFormat` (moeRouterFormat).
   [[nodiscard]] MoePlan moe(MoeShape shape, uint32_t routerFormat, uint32_t rows,
-                            StepKind step) const;
+                            StepKind step, uint32_t aneRows = 0) const;
 
   // The attention workspace that holds any one sequence's partials, a
   // prompt chunk's; and a decode lane's, the most split slots a lane of up to
@@ -93,7 +93,7 @@ public:
   // work, not just the most: a prompt chunk's, or a decode step's of its
   // lanes' packed rows (moe).
   [[nodiscard]] MoeWorkspace moeWorkspace(MoeShape shape, uint32_t routerFormat, uint32_t maximumRows,
-                                          StepKind step) const;
+                                          StepKind step, uint32_t aneRows = 0) const;
   // The gate scratch of every gate/up plan of a decode step of 1 to
   // `maximumRows` rows of a pair of `shape` (decodeLinear's): one
   // whole-command buffer, not a per-lane arena field.

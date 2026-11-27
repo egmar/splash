@@ -147,8 +147,13 @@ DraftAttentionPlan ExecutionPlans::draftAttention(DraftAttentionShape shape,
   return DraftAttention::plan(shape, lanes);
 }
 
-MoePlan ExecutionPlans::moe(MoeShape shape, uint32_t routerFormat, uint32_t rows, StepKind step) const {
-  return MoE::plan(shape, rows, selectMoe(calibration(), linear_.int8Activations(), step, shape, routerFormat, rows));
+MoePlan ExecutionPlans::moe(MoeShape shape, uint32_t routerFormat, uint32_t rows, StepKind step,
+                            uint32_t aneRows) const {
+  // The Neural Engine's region of the step's expert outputs, where a split
+  // takes the step (MoeConfig::aneRows).
+  MoeConfig config = selectMoe(calibration(), linear_.int8Activations(), step, shape, routerFormat, rows);
+  config.aneRows = aneRows;
+  return MoE::plan(shape, rows, config);
 }
 
 AttentionWorkspace ExecutionPlans::sequenceAttentionWorkspace(uint32_t queryHeads, kv::Layout layout) const {
@@ -167,12 +172,12 @@ DraftAttentionWorkspace ExecutionPlans::draftAttentionWorkspacePerLane(
 }
 
 MoeWorkspace ExecutionPlans::moeWorkspace(MoeShape shape, uint32_t routerFormat, uint32_t maximumRows,
-                                          StepKind step) const {
+                                          StepKind step, uint32_t aneRows) const {
   // Validate the bound before iterating; every row is included even if a
   // future grouped layout's largest field is not monotone in row count.
-  MoeWorkspace bound = moe(shape, routerFormat, maximumRows, step).workspace();
+  MoeWorkspace bound = moe(shape, routerFormat, maximumRows, step, aneRows).workspace();
   for (uint32_t rows = 1; rows <= maximumRows; ++rows) {
-    const MoeWorkspace required = moe(shape, routerFormat, rows, step).workspace();
+    const MoeWorkspace required = moe(shape, routerFormat, rows, step, aneRows).workspace();
     for (const auto field : kMoeWorkspaceFields) bound.*field = std::max(bound.*field, required.*field);
   }
   return bound;

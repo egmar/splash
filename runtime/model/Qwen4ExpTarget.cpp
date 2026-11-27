@@ -95,8 +95,9 @@ std::vector<uint32_t> Qwen4ExpTarget::verifyTableRows(const ops::LaneRows &rows)
 std::vector<metal::MetalBuffer> Qwen4ExpTarget::addPrefill(metal::CommandGraph &graph,
                                                            std::span<const QwenTargetPrefillChunk> chunks,
                                                            const kv::PageStorage &kv, SpilledKvReads &spilled,
-                                                           QwenPrefillLayers layers, ops::AneFfn *aneFfn) {
-  std::vector<PrefillStep> steps = prefillSteps<PrefillStep>(graph, chunks, kv, spilled, layers, aneFfn);
+                                                           QwenPrefillLayers layers, ops::AneFfn *aneFfn,
+                                                           ops::AneMoe *aneMoe) {
+  std::vector<PrefillStep> steps = prefillSteps<PrefillStep>(graph, chunks, kv, spilled, layers, aneFfn, aneMoe);
   const std::vector<uint32_t> offsets = indexOffsets(kv, geometry_.kvLayout.attentionLayers);
   // The inputs of the chunks' rows are written once, for their first layer.
   const bool begins = !layers.first;

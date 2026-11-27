@@ -27,6 +27,7 @@
 
 namespace splash::ops {
 class AneFfn;
+class AneMoe;
 } // namespace splash::ops
 
 namespace splash::kv {
@@ -128,6 +129,11 @@ struct QwenTargetGeometry final : QwenTargetDimensions {
   // Whether the blocks' experts take the int8 prefill passes: their routing
   // and formats (ops::moeInt8Experts), and resident (RuntimeGeometry::from).
   bool moeInt8Experts = false;
+  // The rows of each prefill step's Neural Engine region, the expert outputs
+  // after the routes that a split's join writes (ops::AneMoe::regionRows):
+  // the arenas size the step's scratch for them, and so do the plans of a
+  // step the split takes. 0 without a split.
+  uint32_t aneMoeRows = 0;
   // The blocks' shape as their plans take it.
   [[nodiscard]] ops::MoeShape moeShape() const noexcept {
     ops::MoeShape shape = moeBlockShape();
@@ -529,7 +535,8 @@ public:
                                                                    std::span<const QwenTargetPrefillChunk> chunks,
                                                                    const kv::PageStorage &kv, SpilledKvReads &spilled,
                                                                    QwenPrefillLayers layers,
-                                                                   ops::AneFfn *aneFfn = nullptr) = 0;
+                                                                   ops::AneFfn *aneFfn = nullptr,
+                                                                   ops::AneMoe *aneMoe = nullptr) = 0;
   // Adds what only a state captured inside a prefill sequence's rows runs:
   // for a sequence of the first chunk from auxiliary state `auxiliaryIn`,
   // capturing after its first row into `captured`. That is Flash-Next's PLE
@@ -629,6 +636,10 @@ protected:
     // layer's load and its routed work (addPrefillExperts) share.
     ops::MoeBuffers ffn{};
     ops::AneFfn *aneFfn = nullptr;
+    // The Neural Engine's MoE split of the command, which its routing marks
+    // and its expert work joins (ops::AneMoe); none where it takes none of
+    // the command's routes.
+    ops::AneMoe *aneMoe = nullptr;
     uint32_t gdnLayer = 0;
     uint32_t attentionLayer = 0;
     // The rows of the layer being added that something reads, ascending, when
@@ -658,13 +669,15 @@ protected:
   [[nodiscard]] std::vector<Step> prefillSteps(metal::CommandGraph &graph,
                                                std::span<const QwenTargetPrefillChunk> chunks,
                                                const kv::PageStorage &kv, SpilledKvReads &spilled,
-                                               QwenPrefillLayers layers, ops::AneFfn *aneFfn) const {
+                                               QwenPrefillLayers layers, ops::AneFfn *aneFfn,
+                                               ops::AneMoe *aneMoe = nullptr) const {
     ops::AneFfn *split = splitOf(chunks, layers, aneFfn);
+    ops::AneMoe *moeSplit = aneMoeOf(chunks, aneMoe);
     requirePrefill(chunks, kv, layers);
     std::vector<Step> steps;
     steps.reserve(chunks.size());
     for (const QwenTargetPrefillChunk &chunk : chunks)
-      steps.push_back(Step{prefillStep(graph, chunk, kv, spilled, split)});
+      steps.push_back(Step{prefillStep(graph, chunk, kv, spilled, split, moeSplit)});
     return steps;
   }
   // A prefill's layers `range` over its steps (addPrefill), through a
@@ -847,9 +860,14 @@ private:
   // whole and cut as its first step's rows say; null where it does not.
   [[nodiscard]] ops::AneFfn *splitOf(std::span<const QwenTargetPrefillChunk> chunks, QwenPrefillLayers layers,
                                      ops::AneFfn *aneFfn) const;
+  // `aneMoe` where it takes the command's routes: a command of one chunk, the
+  // chunks of a MoE target's prefill commands (RuntimeArenas::from). The
+  // command's steps share the split's packed surfaces, which a second chunk's
+  // pack would overwrite while the first's evaluation reads them.
+  [[nodiscard]] ops::AneMoe *aneMoeOf(std::span<const QwenTargetPrefillChunk> chunks, ops::AneMoe *aneMoe) const;
   [[nodiscard]] PrefillStep prefillStep(metal::CommandGraph &graph, const QwenTargetPrefillChunk &chunk,
                                         const kv::PageStorage &kv, SpilledKvReads &spilled,
-                                        ops::AneFfn *aneFfn) const;
+                                        ops::AneFfn *aneFfn, ops::AneMoe *aneMoe) const;
 };
 
 // The target of a Qwen3.5-architecture family's weights (Qwen3.8-27B,
