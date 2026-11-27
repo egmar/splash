@@ -193,6 +193,7 @@ TEST_GGUF_PROJECTION_BENCHMARK := $(ENGINE_TEST_BUILD)/gguf-projection-benchmark
 TEST_VISION_TOWER_BENCHMARK := $(ENGINE_TEST_BUILD)/vision-tower-benchmark
 TEST_DENSE_LINEAR_BENCHMARK := $(ENGINE_TEST_BUILD)/dense-linear-benchmark
 TEST_GGUF_MOE_BENCHMARK := $(ENGINE_TEST_BUILD)/gguf-moe-benchmark
+TEST_ANE_MOE_BENCHMARK := $(ENGINE_TEST_BUILD)/ane-moe-benchmark
 TEST_MODEL_RUNTIME_ORACLE := $(ENGINE_TEST_BUILD)/model-runtime-oracle
 WEIGHT_DIGESTS := $(ENGINE_TEST_BUILD)/weight-digests
 TEST_VISION_ENCODER_TEST := $(ENGINE_TEST_BUILD)/vision-encoder
@@ -340,7 +341,7 @@ TEST_METAL_TARGETS := $(TEST_DRAFT_PREPARATION) \
 TEST_CONFIG_TARGETS := $(filter-out $(LIB) $(HOST_STEP_LIB),$(sort $(TEST_CPU_TARGETS) $(TEST_METAL_TARGETS))) \
 	$(TEST_MODEL_RUNTIME_ORACLE) $(TEST_VISION_ENCODER_TEST) \
 	$(TEST_DECODE_PROFILE) $(TEST_TEACHER_LOGITS) $(TEST_ATTENTION_SWEEP) \
-	$(TEST_GGUF_PROJECTION_BENCHMARK) $(TEST_GGUF_MOE_BENCHMARK) $(TEST_VISION_TOWER_BENCHMARK) $(TEST_DENSE_LINEAR_BENCHMARK) \
+	$(TEST_GGUF_PROJECTION_BENCHMARK) $(TEST_GGUF_MOE_BENCHMARK) $(TEST_ANE_MOE_BENCHMARK) $(TEST_VISION_TOWER_BENCHMARK) $(TEST_DENSE_LINEAR_BENCHMARK) \
 	$(TEST_Q8_AIR) $(TEST_Q8_KERNEL_AIRS) $(TEST_RESIDENCY_AIR) $(TEST_HOST_STEP_AIR) $(TEST_METAL_BACKEND_AIR) \
 	$(TEST_GGUF_DEQUANT_AIR) $(TEST_GGUF_MOE_AIR) $(TEST_ATTENTION_STORE_AIR) $(TEST_STATE_CODEC_AIR) \
 	$(TEST_MESSAGE_GATE_AIR)
@@ -585,6 +586,8 @@ $(TEST_GGUF_PROJECTION_BENCHMARK): dev/benchmarks/gguf_projection_benchmark.mm \
 $(TEST_GGUF_MOE_BENCHMARK): dev/benchmarks/gguf_moe_benchmark.mm \
 		dev/benchmarks/DispatchReplay.hpp \
 		$(ENGINE_LIBRARY) $(LIB)
+$(TEST_ANE_MOE_BENCHMARK): dev/benchmarks/ane_moe_benchmark.mm dev/benchmarks/AneMoePlan.hpp \
+		$(ENGINE_LIBRARY) $(LIB)
 $(TEST_VISION_TOWER_BENCHMARK): dev/benchmarks/vision_tower_benchmark.mm $(ENGINE_LIBRARY) $(LIB)
 $(TEST_DENSE_LINEAR_BENCHMARK): dev/benchmarks/dense_linear_benchmark.mm $(ENGINE_LIBRARY) $(LIB)
 
@@ -607,7 +610,7 @@ $(TEST_MODEL_CONFIGURATION) $(TEST_DRAFT_PREPARATION) $(TEST_GGUF_PROJECTION) $(
 		$(TEST_METAL_BACKEND_TEST) $(TEST_HANDOFF_TEST) $(TEST_PRESSURE_SERVING) $(TEST_VISION_ENCODER_TEST) \
 		$(TEST_MODEL_RUNTIME_ORACLE) \
 		$(TEST_DECODE_PROFILE) $(TEST_TEACHER_LOGITS) $(TEST_ATTENTION_SWEEP) \
-		$(TEST_GGUF_PROJECTION_BENCHMARK) $(TEST_GGUF_MOE_BENCHMARK) $(TEST_VISION_TOWER_BENCHMARK) $(TEST_DENSE_LINEAR_BENCHMARK): | $(ENGINE_TEST_BUILD)
+		$(TEST_GGUF_PROJECTION_BENCHMARK) $(TEST_GGUF_MOE_BENCHMARK) $(TEST_ANE_MOE_BENCHMARK) $(TEST_VISION_TOWER_BENCHMARK) $(TEST_DENSE_LINEAR_BENCHMARK): | $(ENGINE_TEST_BUILD)
 	$(RUN_CONFIGURED) $(CXX) $(ENGINE_TEST_CXXFLAGS) -fobjc-arc $(TEST_INPUTS) \
 		$(ENGINE_LINKFLAGS) -o $@
 
@@ -864,7 +867,7 @@ test-real: preflight $(TARGET) $(TEST_MODEL_RUNTIME_ORACLE) \
 
 .PHONY: benchmark-backend \
 	benchmark-decode-profile benchmark-attention-sweep \
-	benchmark-gguf-projection benchmark-gguf-moe teacher-logits
+	benchmark-gguf-projection benchmark-gguf-moe benchmark-ane-moe teacher-logits
 # decode-profile replays the installed model's prefill and decode commands as
 # separate dispatches; DECODE_PROFILE_ARGS passes --prompt-tokens/--cycles,
 # or --images HxW[,HxW...] for the vision encoder on synthetic images.
@@ -899,6 +902,12 @@ benchmark-gguf-projection: $(TEST_GGUF_PROJECTION_BENCHMARK) $(LIB)
 # [rounds] for the expert repack.
 benchmark-gguf-moe: $(TEST_GGUF_MOE_BENCHMARK) $(LIB)
 	$(TEST_GGUF_MOE_BENCHMARK) $(LIB) $(GGUF_MOE_ARGS)
+
+# NPUMoE-style grouped ANE prototype. ANE_MOE_ARGS selects plan-check, check,
+# sweep or layer and passes that mode's --name=value options.
+ANE_MOE_ARGS ?= plan-check
+benchmark-ane-moe: $(TEST_ANE_MOE_BENCHMARK) $(LIB)
+	$(TEST_ANE_MOE_BENCHMARK) $(ANE_MOE_ARGS)
 
 benchmark-backend: preflight $(TARGET) $(TEST_BACKEND_BENCHMARK) $(LIB)
 	$(TEST_BACKEND_BENCHMARK) $(LIB) "$(MODEL_ROOT)"
