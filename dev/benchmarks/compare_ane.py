@@ -38,11 +38,13 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def run(benchmark: Path, metallib: Path, model_root: Path, args: list[str]) -> dict:
-    """One benchmark run's JSON."""
+def run(benchmark: Path, metallib: Path, model_root: Path, args: list[str], label: str) -> dict:
+    """One benchmark run's JSON, its measurements and log passing through as
+    they come."""
+    print(f"\n[{label}]", file=sys.stderr)
     result = subprocess.run(
         [str(benchmark), str(metallib), str(model_root), *args],
-        capture_output=True,
+        stdout=subprocess.PIPE,
         text=True,
     )
     document = None
@@ -51,10 +53,7 @@ def run(benchmark: Path, metallib: Path, model_root: Path, args: list[str]) -> d
             document = line
     if result.returncode != 0 or document is None:
         sys.stderr.write(result.stdout[-2000:])
-        sys.stderr.write(result.stderr[-2000:])
         raise SystemExit(f"the benchmark failed (exit {result.returncode})")
-    if "Neural Engine MoE split:" in result.stderr and "not taken" in result.stderr:
-        raise SystemExit("the split was not taken: " + result.stderr.strip().splitlines()[-1])
     return json.loads(document)
 
 
@@ -73,11 +72,14 @@ def main(argv: list[str]) -> int:
         common += ["--context-lengths", args.context_lengths]
     split = common + ["--ane-moe-experts", str(args.experts), "--ane-moe-capacity", str(args.capacity)]
 
-    print("running the scenarios alone, then with the split twice, then alone again...", file=sys.stderr)
-    alone_first = run(args.benchmark, args.metallib, args.model_root, common)
-    run(args.benchmark, args.metallib, args.model_root, split)
-    with_split = run(args.benchmark, args.metallib, args.model_root, split)
-    alone_last = run(args.benchmark, args.metallib, args.model_root, common)
+    print("alone, with the split twice, then alone again; the second split run is compared", file=sys.stderr)
+    alone_first = run(args.benchmark, args.metallib, args.model_root, common, "1/4 alone")
+    calibrating = run(args.benchmark, args.metallib, args.model_root, split, "2/4 split (calibrating)")
+    with_split = run(args.benchmark, args.metallib, args.model_root, split, "3/4 split (compared)")
+    alone_last = run(args.benchmark, args.metallib, args.model_root, common, "4/4 alone")
+    for document, label in ((calibrating, "the first split run"), (with_split, "the split")):
+        if document["ane_ffn_bytes"] == 0:
+            raise SystemExit(f"{label} took no split: see its log for why")
 
     reference = rows(alone_first)
     drift = rows(alone_last)

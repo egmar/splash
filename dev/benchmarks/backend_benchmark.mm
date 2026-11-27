@@ -1298,6 +1298,24 @@ int main(int argc, char **argv) {
     // The rolling request, a length's longest, appends this many tokens.
     constexpr uint32_t rollingSuffixTokens = 256;
     std::vector<Measurement> measurements;
+    // Each measurement as it is known, so a run that takes tens of minutes
+    // reads as it goes; the table at the end repeats them with the plan's
+    // numbers, which are not known until it finishes.
+    bool announced = false;
+    const auto record = [&](Measurement measurement) {
+      if (!announced) {
+        std::fprintf(stderr, "\nmeasurements as they come (prefill GPU ms, tokens/s):\n");
+        announced = true;
+      }
+      const double perSecond = measurement.prefillGpuMilliseconds > 0.0
+                                   ? 1000.0 * measurement.promptTokens / measurement.prefillGpuMilliseconds
+                                   : 0.0;
+      std::fprintf(stderr, "  %-20s %7u %9.0f %8.0f  ttft %8.0f  %s\n", measurement.scenario.c_str(),
+                   measurement.promptTokens, measurement.prefillGpuMilliseconds, perSecond,
+                   measurement.ttftMilliseconds, measurement.cacheStatus.c_str());
+      std::fflush(stderr);
+      measurements.push_back(std::move(measurement));
+    };
     // Lengths the memory plan cannot hold, on a Mac with less memory.
     std::vector<uint32_t> skippedLengths;
     for (uint32_t length : selected.context || selected.exact
@@ -1355,9 +1373,9 @@ int main(int argc, char **argv) {
             exactResult.coldOutputMatch = coldResult.outputTokens == exactResult.outputTokens;
             if (exactResult.ttftMilliseconds * 2 >= coldResult.ttftMilliseconds)
               performanceFailures.push_back("repeated exact TTFT did not improve twofold");
-            measurements.push_back(std::move(exactResult));
+            record(std::move(exactResult));
           }
-          measurements.push_back(std::move(coldResult));
+          record(std::move(coldResult));
           continue;
         }
         // An agent turn appends the previous answer and a new message. The
@@ -1432,13 +1450,13 @@ int main(int argc, char **argv) {
               std::to_string(sample) +
               " did not improve TTFT by at least two times");
         }
-        measurements.push_back(std::move(coldResult));
-        measurements.push_back(std::move(exactResult));
-        measurements.push_back(std::move(rollingResult));
-        measurements.push_back(std::move(rollingCold));
-        measurements.push_back(std::move(answerResult));
-        measurements.push_back(std::move(continuationResult));
-        measurements.push_back(std::move(continuationCold));
+        record(std::move(coldResult));
+        record(std::move(exactResult));
+        record(std::move(rollingResult));
+        record(std::move(rollingCold));
+        record(std::move(answerResult));
+        record(std::move(continuationResult));
+        record(std::move(continuationCold));
       }
     }
 
@@ -1487,9 +1505,9 @@ int main(int argc, char **argv) {
               std::to_string(expectedPartialRows));
         }
         partialHit.coldOutputMatch = partialCold.outputTokens == partialHit.outputTokens;
-        measurements.push_back(std::move(partialCold));
-        measurements.push_back(std::move(partialSeed));
-        measurements.push_back(std::move(partialHit));
+        record(std::move(partialCold));
+        record(std::move(partialSeed));
+        record(std::move(partialHit));
       }
     }
 
@@ -1528,7 +1546,7 @@ int main(int argc, char **argv) {
             if (result.cacheStatus != "prefix_hit" || result.matchedTokens != context)
               throw std::runtime_error("resume of " + std::to_string(suffix + 1) + " rows matched " +
                                        std::to_string(result.matchedTokens) + " tokens: " + result.cacheStatus);
-            measurements.push_back(std::move(result));
+            record(std::move(result));
           }
       }
     }
@@ -1551,7 +1569,7 @@ int main(int argc, char **argv) {
           if (result.cacheStatus != "miss")
             throw std::runtime_error("short prompt of a " + std::to_string(rows) +
                                      "-row chunk was not a cold miss: " + result.cacheStatus);
-          measurements.push_back(std::move(result));
+          record(std::move(result));
         }
       }
     }
@@ -1579,7 +1597,7 @@ int main(int argc, char **argv) {
           if (result.cacheStatus != "miss")
             throw std::runtime_error("transcript request " + std::to_string(index) +
                                      " was not a cold miss: " + result.cacheStatus);
-          measurements.push_back(std::move(result));
+          record(std::move(result));
         }
       }
     }
@@ -1715,11 +1733,11 @@ int main(int argc, char **argv) {
       }
       lazyChainEnd.coldOutputMatch = lazySeed.outputTokens == lazyChainEnd.outputTokens;
       lazyRepeat.coldOutputMatch = lazySeed.outputTokens == lazyRepeat.outputTokens;
-      measurements.push_back(std::move(lazySeed));
-      measurements.push_back(std::move(lazyChainEnd));
-      measurements.push_back(std::move(lazyRepeat));
-      measurements.push_back(std::move(lazyMaterialize));
-      measurements.push_back(std::move(lazyReuse));
+      record(std::move(lazySeed));
+      record(std::move(lazyChainEnd));
+      record(std::move(lazyRepeat));
+      record(std::move(lazyMaterialize));
+      record(std::move(lazyReuse));
     }
 
     // Shortest form that reads back as the same share.
