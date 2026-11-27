@@ -746,7 +746,11 @@ The rules:
    64-row passes (`ops::MoePlan` refuses them). The 16-core takes 128,
    where 64-row tiles took the 35B's prefill 1.5-2.5% longer and Inkling's
    1024- and 1536-row chunks no shorter: at 2048 rows on Inkling-2-Mini
-   alone. A row's result is the same bits on every tile. One
+   alone. A 16-core M4 Pro (Apple9, macOS 27.3) runs no 64-row tiles: at
+   Inkling-2-Mini's shape they took 1.10-1.16 times the 32-row tiles' time at
+   1024 to 2048 rows and 1.26-1.28 at 512, in IQ3_XXS and IQ2_S gate and up
+   with IQ4_NL down, so Apple9 keeps the 32-row tiles. A row's result is the
+   same bits on every tile. One
    plan per step serves every block, so its router follows rule 3 in the
    format of most blocks' routers
    (`ops::moeRouterFormat`). Every tile's grouped rows are the step's
@@ -1311,7 +1315,9 @@ On Apple10 and Apple11, which multiply int8 at twice their bf16 rate, a prefill 
 staged tile (more than 64 rows) of a projection whose quantized segments are all MLX affine 4- or
 5-bit in groups of 64 (`af4g64`, `af5g64`) or Q8_0 runs `LinearTile::GgufPrefillInt8`
 (`kernels/prefill/gguf_prefill_int8.metal`) instead of the bf16 tile
-(`ProjectionCalibration::prefillInt8`; Apple9, whose int8 matmul runs at 0.9x its bf16 rate, never),
+(`ProjectionCalibration::prefillInt8`; Apple9, whose int8 matmul runs at 0.9x its bf16 rate, never:
+on a 16-core M4 Pro, macOS 27.3, a 2048-row chunk's Q8_0 projections ran in 750 ms on the int8 tile
+against 754 on the bf16 tile, no faster),
 with int8 activations on. With them off (`--activations bf16`) every chunk runs the bf16 tiles,
 bit for bit, and the prefill arena holds no codes. `gguf_prefill_int8_quantize` writes each 64-input
 group of each row as int8 codes with its own scale, by the int8-activation rule
