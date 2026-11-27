@@ -274,10 +274,12 @@ inline void moe_group_routes_phase(
   atomic_store_explicit(&cursors[thread_index], 0u, memory_order_relaxed);
   threadgroup_barrier(mem_flags::mem_threadgroup);
   for (uint route = thread_index; route < routes; route += Slots) {
-    if (moe_shared_slice(route % routes_per_row, params.top_k) >= Shared &&
+    // A route the ANE holds (metal/abi/AneMoe.h) carries ANE_MOE_ROUTE_NONE
+    // and is the grouping's none.
+    const uint expert = selected[route];
+    if (expert != ANE_MOE_ROUTE_NONE && moe_shared_slice(route % routes_per_row, params.top_k) >= Shared &&
         !moe_unverified_route<Shared, Verified>(lane_rows, params, route)) {
-      atomic_fetch_add_explicit(&counts[selected[route]], 1u,
-                                memory_order_relaxed);
+      atomic_fetch_add_explicit(&counts[expert], 1u, memory_order_relaxed);
     }
   }
   threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -321,6 +323,7 @@ inline void moe_group_routes_phase(
       continue;
     }
     const uint expert = selected[route];
+    if (expert == ANE_MOE_ROUTE_NONE) continue;  // its row is the ANE's, written where it was marked
     const uint row = first_rows[expert] +
                      atomic_fetch_add_explicit(&cursors[expert], 1u, memory_order_relaxed);
     grouped_routes[row] = route;
