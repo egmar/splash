@@ -113,7 +113,7 @@ def main(argv: list[str]) -> int:
     calibrating = run(args.benchmark, args.metallib, args.model_root, split, "2/4 split (calibrating)", args.verbose)
     with_split = run(args.benchmark, args.metallib, args.model_root, split, "3/4 split (compared)", args.verbose)
     alone_last = run(args.benchmark, args.metallib, args.model_root, common, "4/4 alone", args.verbose)
-    for document, description in ((calibrating, "the first split run"), (with_split, "the split")):
+    for document, description in ((calibrating, "the first split run"), (with_split, "the second split run")):
         if document["ane_ffn_bytes"] == 0:
             raise SystemExit(f"{description} took no split: see its log for why")
 
