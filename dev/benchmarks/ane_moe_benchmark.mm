@@ -876,6 +876,7 @@ void pipeline(metal::MetalBackend &backend, const Options &options) {
   metal::MetalBuffer chunkRows = shared(uint64_t{routes.rows} * dims.hidden * sizeof(uint16_t), "pipeline rows");
   metal::MetalBuffer expertOutput =
       shared(uint64_t{routeCount + aneRows} * dims.hidden * sizeof(uint16_t), "pipeline expert output");
+  metal::MetalBuffer status = shared(sizeof(uint32_t), "pipeline status");
   auto *selectedValues = static_cast<uint32_t *>(selected.contents());
   for (uint32_t route = 0; route < routeCount; ++route) selectedValues[route] = routes.routes[route].expert;
   std::memcpy(baseTable.contents(), expertBase.data(), expertBase.size() * sizeof(uint32_t));
@@ -941,7 +942,7 @@ void pipeline(metal::MetalBackend &backend, const Options &options) {
     }
     for (size_t index = 0; index < groups.size(); ++index) {
       command.wait(groups[index].event, groups[index].done);
-      command.add("ane_moe_join", {groups[index].work.y.buffer, expertOutput},
+      command.add("ane_moe_join", {groups[index].work.y.buffer, expertOutput, status},
                   AneMoeJoinParams{rowsOffset, groups[index].base, groups[index].rows, dims.hidden,
                                    groups[index].work.y.strideBytes / 2},
                   {groups[index].rows, 1, 1});

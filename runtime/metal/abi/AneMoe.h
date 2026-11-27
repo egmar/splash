@@ -29,7 +29,8 @@ struct AneMoeScaleParams {
   uint32_t group_rows;   // this group's rows (capacity * experts)
 };
 
-// One copy a group: its ANE outputs into the routes' expert-output rows.
+// One copy a group: its ANE outputs into the routes' expert-output rows, and
+// a status word set where one is not finite.
 struct AneMoeJoinParams {
   uint32_t rows_offset;
   uint32_t base;         // this group's first row among the ANE's
@@ -55,3 +56,25 @@ struct AneMoeClearParams {
   uint32_t columns;
   uint32_t base;
 };
+
+// A resident expert's projection as ane_moe_weights_gguf stores it: rows
+// [row, row + rows) of a GGUF image tensor's `groups` groups of 32 inputs,
+// `width` inputs a row, as `rows` int8 rows `stride` bytes apart with their
+// fp16 scales `scale_stride` halves apart. A row's codes are its values over
+// the row's peak / 127, which the row's scale, the peak / 127 * 128, carries
+// back; `multiplier` (the expert's scale, and the headroom of down, AneMoe.cpp)
+// scales that back, not the codes.
+struct AneMoeWeightParams {
+  uint32_t groups;
+  uint32_t row;
+  uint32_t input;
+  uint32_t width;
+  uint32_t stride;
+  uint32_t scale_stride;
+  uint32_t format;
+  uint32_t rows;
+  float multiplier;
+};
+
+static_assert(sizeof(AneMoeClearParams) == 12, "ANE MoE clear parameters are 12 bytes");
+static_assert(sizeof(AneMoeWeightParams) == 36, "ANE MoE weight parameters are 36 bytes");
