@@ -10,9 +10,15 @@
 //   forward of those rows computes them; the routes past capacity and the
 //   other experts' stay the GPU's, their route rows untouched, and a padding
 //   column's rows are zero; a second command computes what the first did, and
-//   a split whose plan takes no block takes no command.
-// The kernels round where the CPU may not, and the experts' int8 rows cost
-// about 1% RMS (build/release/m4pro-prefill/notes.md), so the check allows 3%.
+//   a split whose plan takes no block takes no command;
+// - the step (ops::MoE::addRouting and addRouted with the split): a whole MoE
+//   step of a block of eight experts — router, selection, grouping, expert
+//   passes and combine — computes what it computes without the split within
+//   the Neural Engine's error, its routes are the engine's and the GPU's, and
+//   a step's workspace holds the engine's region (MoeConfig::aneRows).
+// The kernels round where the CPU may not: an expert's int8 rows cost about
+// 1% and the ANE's fp16 arithmetic the rest of the ~5% a joined row differs by
+// (kMaximumError), which a step's combine averages to 0.6%.
 #include "LinearNumerics.hpp"
 #include "MoeFixture.hpp"
 #include "TestBuffers.hpp"
@@ -42,17 +48,17 @@ using splash::test::floatToBf16;
 namespace {
 
 constexpr uint32_t kHidden = 256, kIntermediate = 128, kExperts = 4, kTopK = 2;
-constexpr uint32_t kRows = 64, kCapacity = 32, kResidentExperts = 2;
+constexpr uint32_t kRows = 64, kCapacity = 32, kResidentExperts = 2, kStepExperts = 8;
 // The routes of the block's chunk: 20 to each resident expert (expert 1 first,
 // then expert 3), which the capacity holds, and the rest to the others.
 constexpr uint32_t kRoutesToResident = 20;
 // The ANE's group differs from the FP32 forward of the same weights by about
 // 4% RMS a row with these weights: int8 rows (which the dense split measures
-// at 2.5-2.8% with the GPU's) and the ANE's fp16 arithmetic, which the
-// benchmark's check reports diluted over its padding (0.65% over 97% zero
-// rows, build/release/m4pro-prefill/notes.md). The command's structure is
-// exact; the quality the split costs is Phase 4's KL gate.
-constexpr double kMaximumError = 0.06;
+// at 2.5-2.8% against the GPU's) and the ANE's fp16 arithmetic, which the
+// benchmark's check reports diluted over its padding (0.65% over a run whose
+// output is 97% padding). The command's structure is exact; the quality the
+// split costs is the teacher-forced KL gate.
+constexpr double kMaximumError = 0.08;
 
 int failures = 0;
 int sectionFailures = 0;
@@ -182,7 +188,7 @@ void splitChecks(MetalBackend &backend) {
   std::cout << "  block " << moe_fixture::formatNames(model) << ", experts " << plan.experts << " and "
             << plan.resident.front()[0] << "/" << plan.resident.front()[1] << " of capacity " << plan.capacity << '\n';
   AneMoe split(backend, std::span(&model.weights, 1), block, plan, {});
-  if (split.regionRows(0) != plan.rows()) fail("the block's region is not its group's rows");
+  if (split.regionRows() != plan.rows()) fail("the block's region is not its group's rows");
   if (split.splits(AneMoe::kMinimumRows - 1) || !split.splits(AneMoe::kMinimumRows) ||
       !split.splits(kRows) || !split.splits(AneMoe::kMaximumRows) || split.splits(AneMoe::kMaximumRows + 1))
     fail("the split takes commands of other rows");
@@ -222,8 +228,8 @@ void splitChecks(MetalBackend &backend) {
     std::memset(buffers.scratch.expertOutput.contents(), 0, (routes + plan.rows()) * kHidden * sizeof(uint16_t));
     static_cast<void>(split.begin(kRows));
     CommandGraph graph;
-    split.addRouting(graph, buffers, moe, 0);
-    split.addJoin(graph, buffers, moe, 0);
+    split.addRouting(graph, buffers, moe, model.weights);
+    split.addJoin(graph, buffers, moe, model.weights);
     static_cast<void>(split.commit(graph, {}).wait());
     run.usable = split.finish();
     const auto *values = static_cast<const uint16_t *>(buffers.scratch.expertOutput.contents());
@@ -316,7 +322,88 @@ void splitChecks(MetalBackend &backend) {
   }
   // A plan of no block takes no command.
   AneMoe empty(backend, std::span(&model.weights, 1), block, AneMoe::Plan{}, {});
-  if (empty.splits(kRows) || empty.regionRows(0)) fail("a split of no block takes a command");
+  if (empty.splits(kRows) || empty.regionRows()) fail("a split of no block takes a command");
+}
+
+// A whole MoE step of the block — the routing, the grouping, the expert
+// passes and the combine — with and without the split: the engine's routes
+// leave the GPU's grouping and join before the combine, so both compute the
+// block's output, within the ANE's error of the routes it takes.
+void stepChecks(MetalBackend &backend) {
+  // The router's float projection writes whole groups of eight experts, so a
+  // block of four runs no whole step.
+  MoeShape block = shape();
+  block.experts = kStepExperts;
+  moe_fixture::Model model = moe_fixture::makeModel(backend, block, 0, false);
+  const AneMoe::Loads corpus{{10, 90, 5, 70, 20, 30, 15, 25}};
+  const AneMoe::Plan plan = AneMoe::plan(std::span(&block, 1), corpus,
+                                         AneMoe::Selection{.experts = kResidentExperts, .capacity = kCapacity});
+  if (plan.resident.front() != std::vector<uint32_t>{1, 3})
+    fail("the step's resident experts are not the most-routed");
+  AneMoe split(backend, std::span(&model.weights, 1), block, plan, {});
+  const MoePlan plainPlan = MoE::plan(block, kRows, MoeConfig{});
+  const MoePlan splitPlan = MoE::plan(block, kRows, MoeConfig{.aneRows = plan.rows()});
+  if (splitPlan.workspace().expertOutputBytes <= plainPlan.workspace().expertOutputBytes)
+    fail("a step with the engine's region sizes no more expert output than without");
+  const uint64_t hiddenBytes = uint64_t{kRows} * kHidden * sizeof(uint16_t);
+  const MetalBuffer input = test::sharedBuffer(backend, hiddenBytes);
+  const MetalBuffer residual = test::sharedBuffer(backend, hiddenBytes);
+  std::normal_distribution<float> normal;
+  auto *rows = static_cast<__bf16 *>(input.contents());
+  for (uint64_t i = 0; i < uint64_t{kRows} * kHidden; ++i) rows[i] = __bf16(normal(moe_fixture::rng));
+  std::memset(residual.contents(), 0, hiddenBytes);
+  struct Run final {
+    std::vector<uint16_t> output;
+    std::vector<uint32_t> selected;
+    bool usable = true;
+  };
+  const auto run = [&](const MoePlan &moe, AneMoe *ane) {
+    Run out;
+    MoeBuffers buffers;
+    buffers.input = input;
+    buffers.residual = residual;
+    buffers.output = test::sharedBuffer(backend, hiddenBytes);
+    moe_fixture::Buffers allocated;
+    moe_fixture::allocate(backend, allocated, moe);
+    buffers.scratch = allocated.moe.scratch;
+    CommandGraph graph;
+    if (ane) static_cast<void>(ane->begin(kRows));
+    MoE::addRouting(graph, buffers, model.weights, moe, ane);
+    MoE::addRouted(graph, buffers, model.weights, moe, nullptr, ane);
+    if (ane) {
+      static_cast<void>(ane->commit(graph, {}).wait());
+      out.usable = ane->finish();
+    } else {
+      static_cast<void>(backend.submitCommandAsync(graph.command()).wait());
+    }
+    const auto *values = static_cast<const uint16_t *>(buffers.output.contents());
+    out.output.assign(values, values + uint64_t{kRows} * kHidden);
+    const auto *selected = static_cast<const uint32_t *>(buffers.scratch.selectedExperts.contents());
+    out.selected.assign(selected, selected + uint64_t{kRows} * block.routesPerToken());
+    return out;
+  };
+  const Run alone = run(plainPlan, nullptr);
+  const Run engine = run(splitPlan, &split);
+  if (!engine.usable) fail("a step with the split was not usable");
+  const uint32_t ane = static_cast<uint32_t>(
+      std::count(engine.selected.begin(), engine.selected.end(), ANE_MOE_ROUTE_NONE));
+  const uint32_t gpu = static_cast<uint32_t>(
+      std::count_if(engine.selected.begin(), engine.selected.end(), [](uint32_t e) { return e != ANE_MOE_ROUTE_NONE; }));
+  const uint32_t whole = static_cast<uint32_t>(
+      std::count_if(alone.selected.begin(), alone.selected.end(), [](uint32_t e) { return e != ANE_MOE_ROUTE_NONE; }));
+  if (!ane) fail("the split took none of the step's routes");
+  if (whole != alone.selected.size()) fail("the GPU alone left a route ungrouped");
+  if (gpu + ane != alone.selected.size()) fail("the step's routes are not the engine's and the GPU's");
+  double difference = 0.0, scale = 0.0;
+  for (uint64_t i = 0; i < alone.output.size(); ++i) {
+    const double a = bf16ToFloat(alone.output[i]), b = bf16ToFloat(engine.output[i]);
+    difference += (b - a) * (b - a);
+    scale += a * a;
+  }
+  const double error = scale > 0.0 ? std::sqrt(difference / scale) : 0.0;
+  std::cout << "  step: " << ane << " of " << alone.selected.size() << " routes on the engine, output differs by "
+            << 100.0 * error << "%\n";
+  if (!(error <= 0.08)) fail("a step with the split differs from the GPU's by " + std::to_string(100.0 * error) + "%");
 }
 
 } // namespace
@@ -332,6 +419,8 @@ int main(int argc, char **argv) {
     MetalBackend backend(argv[1]);
     splitChecks(backend);
     section("split");
+    stepChecks(backend);
+    section("step");
   } catch (const std::exception &error) {
     std::cout << "FAIL " << error.what() << '\n';
     return 1;

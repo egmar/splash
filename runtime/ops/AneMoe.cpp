@@ -292,7 +292,7 @@ std::string AneMoe::function(const MoeShape &shape, uint32_t experts, uint32_t c
 
 AneMoe::AneMoe(metal::MetalBackend &backend, std::span<const BlockMoeWeights> blocks, const MoeShape &shape,
                Plan plan, std::function<bool()> interrupted)
-    : backend_(backend), shape_(shape), plan_(std::move(plan)), handoff_(backend, kHandoffBound) {
+    : backend_(backend), blocks_(blocks), shape_(shape), plan_(std::move(plan)), handoff_(backend, kHandoffBound) {
   if (const char *reason = unsupported(shape)) throw std::invalid_argument(reason);
   if (!plan_.resident.empty() && plan_.resident.size() != blocks.size())
     throw std::invalid_argument("ANE MoE split has residents of other blocks");
@@ -435,8 +435,11 @@ AneMoe::AneMoe(metal::MetalBackend &backend, std::span<const BlockMoeWeights> bl
   if (!graph.dispatches().empty()) static_cast<void>(backend_.submitCommandAsync(graph.dispatches()).wait());
 }
 
-uint32_t AneMoe::regionRows(uint32_t block) const noexcept {
-  return block < groups_.size() && !groups_[block].experts.empty() ? plan_.rows() : 0;
+uint32_t AneMoe::blockOf(const BlockMoeWeights &weights) const {
+  const BlockMoeWeights *first = blocks_.data();
+  if (blocks_.empty() || &weights < first || &weights >= first + blocks_.size())
+    throw std::logic_error("ANE MoE split was asked to split a block it was not built from");
+  return static_cast<uint32_t>(&weights - first);
 }
 
 bool AneMoe::splits(uint32_t rows) const {
@@ -454,8 +457,11 @@ bool AneMoe::begin(uint32_t rows) {
   return splits(rows);
 }
 
-void AneMoe::addRouting(metal::CommandGraph &graph, const MoeBuffers &buffers, const MoePlan &plan, uint32_t block) {
-  if (!splits(plan.rows()) || block >= groups_.size() || groups_[block].experts.empty()) return;
+void AneMoe::addRouting(metal::CommandGraph &graph, const MoeBuffers &buffers, const MoePlan &plan,
+                        const BlockMoeWeights &weights) {
+  if (!splits(plan.rows())) return;
+  const uint32_t block = blockOf(weights);
+  if (groups_[block].experts.empty()) return;
   const Group &group = groups_[block];
   if (plan.rows() != rows_)
     throw std::logic_error("ANE MoE split packs a command of other rows than it began");
@@ -487,8 +493,10 @@ void AneMoe::addRouting(metal::CommandGraph &graph, const MoeBuffers &buffers, c
   pending_ = block;
 }
 
-void AneMoe::addJoin(metal::CommandGraph &graph, const MoeBuffers &buffers, const MoePlan &plan, uint32_t block) {
+void AneMoe::addJoin(metal::CommandGraph &graph, const MoeBuffers &buffers, const MoePlan &plan,
+                     const BlockMoeWeights &weights) {
   if (!splits(plan.rows()) || !pending_) return;
+  const uint32_t block = blockOf(weights);
   if (*pending_ != block)
     throw std::logic_error("ANE MoE split joins block " + std::to_string(block) + " after " +
                            std::to_string(*pending_));

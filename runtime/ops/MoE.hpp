@@ -228,6 +228,7 @@ struct MoeScratch;
 struct MoeBuffers;
 class MoePlan;
 class MoeExpertStream;
+class AneMoe;
 
 // The weights of one sparse MoE block, which the loaded model owns. The
 // router is a float segment in the format its checkpoint holds it (a GGUF's
@@ -347,6 +348,8 @@ struct MoeScratch final {
   metal::MetalBuffer expertSlots;
   metal::MetalBuffer groupedInput;
   metal::MetalBuffer expertIntermediate;
+  // A row per route, then the Neural Engine's region of MoeConfig::aneRows
+  // rows after them, which its join writes and its routes' route rows name.
   metal::MetalBuffer expertOutput;
   // The int8 passes' (MoeConfig::int8Passes): the chunk's input rows as int8
   // codes and their scales per 64 inputs, and the grouped rows' (the input's,
@@ -410,6 +413,10 @@ struct MoeConfig final {
   // A resident block's prefill passes on int8 activations where its expert
   // projections are af4g64 or af5g64 (MoE::addRouted, moe_int8.metal).
   bool int8Passes = false;
+  // The rows a Neural Engine split's join writes after the routes in each
+  // step's expert outputs, its region (ops::AneMoe::regionRows()); 0 without
+  // one, and the workspace holds no more than the routes'.
+  uint32_t aneRows = 0;
   bool operator==(const MoeConfig &) const = default;
 };
 
@@ -426,6 +433,8 @@ public:
   [[nodiscard]] const MoeWorkspace &workspace() const noexcept {
     return workspace_;
   }
+  // The rows of the Neural Engine's region of the step's expert outputs.
+  [[nodiscard]] uint32_t aneRows() const noexcept { return config_.aneRows; }
 
 private:
   friend struct MoE;
@@ -498,13 +507,17 @@ struct MoE final {
   // through its combine before the next step's: they share the scratch their
   // gathers and passes write, all but their routing. With `convolution` (a
   // verify step's) the combine runs it on its rows (MoeCombineConvolution).
+  // With `ane` (a Neural Engine split) the block's routes that the engine
+  // holds are marked out of the selection before the grouping, and packed
+  // into its surfaces, whose evaluation the step signals; addRouted then
+  // joins them before the combine.
   static void addRouting(metal::CommandGraph &graph, const MoeBuffers &buffers,
-                         const BlockMoeWeights &weights, const MoePlan &plan);
+                         const BlockMoeWeights &weights, const MoePlan &plan, AneMoe *ane = nullptr);
   static void addResident(metal::CommandGraph &graph, const MoeBuffers &buffers,
                           const BlockMoeWeights &weights, const MoePlan &plan);
   static void addRouted(metal::CommandGraph &graph, const MoeBuffers &buffers,
                         const BlockMoeWeights &weights, const MoePlan &plan,
-                        const MoeCombineConvolution *convolution = nullptr);
+                        const MoeCombineConvolution *convolution = nullptr, AneMoe *ane = nullptr);
   // A combine (`combine`, its rows the step's) running a verify step's
   // convolution of its rows (`convolution`, ShortConvolution::verifyParams'),
   // in one dispatch (moe_combine_convolution): the bits the combine into

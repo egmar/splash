@@ -3,6 +3,7 @@
 #include "metal/abi/ExecutionGeometry.h"
 #include "metal/abi/Gguf.h"
 #include "metal/abi/MoE.h"
+#include "ops/AneMoe.hpp"
 #include "ops/BufferExtent.hpp"
 #include "ops/LaneBindings.hpp"
 
@@ -69,7 +70,7 @@ void validate(const BlockMoeWeights &weights, MoeShape shape) {
     throw std::invalid_argument("MoE expert chunks were checked for another block");
 }
 
-MoeWorkspace workspaceFor(MoeShape shape, uint32_t rows, uint32_t tileRows, bool int8Passes) {
+MoeWorkspace workspaceFor(MoeShape shape, uint32_t rows, uint32_t tileRows, bool int8Passes, uint32_t aneRows) {
   if (!shape.valid())
     throw std::invalid_argument("invalid MoE workspace shape");
   const uint64_t routes = uint64_t{rows} * shape.routesPerToken();
@@ -91,7 +92,7 @@ MoeWorkspace workspaceFor(MoeShape shape, uint32_t rows, uint32_t tileRows, bool
           routes * sizeof(uint32_t), routes * sizeof(uint32_t), uint64_t{shape.experts} * sizeof(uint32_t),
           std::max(tableBytes(shape.hiddenSize, matmulRows), scoreBytes),
           matmulRows * shape.expertIntermediateSize * sizeof(uint16_t),
-          routes * shape.hiddenSize * sizeof(uint16_t),
+          (routes + aneRows) * shape.hiddenSize * sizeof(uint16_t),
           int8Passes ? gguf_prefill_int8_table_bytes(shape.hiddenSize, rows) : 0,
           int8Passes ? gguf_prefill_int8_scale_bytes(shape.hiddenSize, rows) : 0,
           int8Passes ? gguf_prefill_int8_table_bytes(widest, routes) : 0,
@@ -196,7 +197,7 @@ MoePlan::MoePlan(MoeShape shape, uint32_t rows, MoeConfig config)
   // an expert that select them (selectMoe).
   if (config.expertTile == MoeExpertTile::M64 && shape.sharedSlices == 2)
     throw std::invalid_argument("invalid MoE expert tiles: no 64-row passes for two shared slices");
-  workspace_ = workspaceFor(shape, rows, tileRows(), config.int8Passes);
+  workspace_ = workspaceFor(shape, rows, tileRows(), config.int8Passes, config.aneRows);
   maximumTiles_ = moeMaximumTiles(rows, shape, tileRows());
 }
 
@@ -292,7 +293,7 @@ void addCombine(metal::CommandGraph &graph, const MoeBuffers &buffers, const Moe
 } // namespace
 
 void MoE::addRouting(metal::CommandGraph &graph, const MoeBuffers &buffers, const BlockMoeWeights &weights,
-                     const MoePlan &plan) {
+                     const MoePlan &plan, AneMoe *ane) {
   const MoeShape shape = plan.shape();
   const uint32_t rows = plan.rows();
   validate(weights, shape);
@@ -313,6 +314,9 @@ void MoE::addRouting(metal::CommandGraph &graph, const MoeBuffers &buffers, cons
   MoE::addRoutes(graph, buffers.input, weights.router, weights.sharedScalarGate, weights.selectionBias,
                  scratch.groupedInput, scratch.selectedExperts, scratch.routingWeights, rows, shape,
                  plan.configuration().ggufRouterTile);
+  // The routes a Neural Engine split takes leave the selection here, before
+  // the grouping, which skips them and keeps the GPU's other routes' tiles.
+  if (ane) ane->addRouting(graph, buffers, plan, weights);
   // The expert passes launch the live tiles alone, on grids the grouping
   // writes with the tile count: a one-lane 35B decode step fills a median of
   // 30 of the 65 tiles it could, and the idle ones' threadgroups, returning at
@@ -343,7 +347,7 @@ void MoE::addResident(metal::CommandGraph &graph, const MoeBuffers &buffers,
 // and passes over every expert. Then the combine.
 void MoE::addRouted(metal::CommandGraph &graph, const MoeBuffers &buffers,
                     const BlockMoeWeights &weights, const MoePlan &plan,
-                    const MoeCombineConvolution *convolution) {
+                    const MoeCombineConvolution *convolution, AneMoe *ane) {
   const MoeGroupParams group = groupParams(plan, weights);
   if (weights.stream) {
     addExperts(graph, buffers.scratch, weights, weights.loadSlotTable, plan, group, MOE_TILES_LOADED);
@@ -353,6 +357,9 @@ void MoE::addRouted(metal::CommandGraph &graph, const MoeBuffers &buffers,
     addGather(graph, buffers, plan);
     addExperts(graph, buffers.scratch, weights, weights.slotTable, plan, group, MOE_TILES_ALL);
   }
+  // The Neural Engine's rows join before the combine, which reads every
+  // route's row, the engine's included.
+  if (ane) ane->addJoin(graph, buffers, plan, weights);
   addCombine(graph, buffers, plan, convolution);
 }
 

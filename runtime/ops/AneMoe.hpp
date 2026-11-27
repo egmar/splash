@@ -123,9 +123,10 @@ public:
     uint64_t commands = 0, evaluations = 0;
   };
   [[nodiscard]] const Served &served() const noexcept { return served_; }
-  // The rows of a block's group, its applications' rows of the scratch's
-  // expert outputs: 0 for a block the split leaves on the GPU.
-  [[nodiscard]] uint32_t regionRows(uint32_t block) const noexcept;
+  // The rows a block's group joins after the routes of each step's expert
+  // outputs (MoeConfig::aneRows, MoeWorkspace::expertOutputBytes): every
+  // resident block's group holds them, and 0 when the split takes no block.
+  [[nodiscard]] uint32_t regionRows() const noexcept { return plan_.empty() ? 0 : plan_.rows(); }
   // What Metal allocated for the split.
   [[nodiscard]] uint64_t allocatedBytes() const noexcept { return allocatedBytes_; }
 
@@ -140,17 +141,20 @@ public:
   // Starts a command of `rows` rows; false once the split stopped. A command
   // begun but neither committed nor cancelled is cancelled by the next one.
   bool begin(uint32_t rows);
-  // After block `block`'s routing, before its GPU work: the ANE's routes
-  // marked out of `buffers.scratch.selectedExperts`, their input rows packed
-  // into the ANE's surface, and the block's evaluation signalled — one
-  // `addRouting` an application, its `addJoin` after the block's expert
-  // passes and before its combine. Nothing for a block the split leaves on
-  // the GPU, or a command the split does not take.
-  void addRouting(metal::CommandGraph &graph, const MoeBuffers &buffers, const MoePlan &plan, uint32_t block);
+  // After `weights`' routing, before its GPU work: the ANE's routes marked
+  // out of `buffers.scratch.selectedExperts`, their input rows packed into
+  // the ANE's surface, and the block's evaluation signalled — one addRouting
+  // an application, its addJoin after the block's expert passes and before
+  // its combine. Nothing for a block the split leaves on the GPU, or a
+  // command the split does not take. `weights` is one of the blocks the split
+  // was built from (a block it does not know throws std::logic_error).
+  void addRouting(metal::CommandGraph &graph, const MoeBuffers &buffers, const MoePlan &plan,
+                  const BlockMoeWeights &weights);
   // Waits for the application's evaluation and copies its rows into
   // `buffers.scratch.expertOutput`, which must hold the block's region after
   // the routes (regionRows()).
-  void addJoin(metal::CommandGraph &graph, const MoeBuffers &buffers, const MoePlan &plan, uint32_t block);
+  void addJoin(metal::CommandGraph &graph, const MoeBuffers &buffers, const MoePlan &plan,
+               const BlockMoeWeights &weights);
   // Submits the command encoded since begin() (MetalBackend::submitCommandAsync),
   // then starts its evaluations. A submission that throws starts none and
   // stops the split before the exception goes on. Throws std::logic_error for
@@ -194,15 +198,17 @@ private:
   // packed rows.
   [[nodiscard]] static std::string function(const MoeShape &shape, uint32_t experts, uint32_t capacity,
                                             const std::vector<ane::Surface> &surfaces, const ane::Surface &output);
-  // Requantizes `block`'s residents into `group`'s surfaces, from the block's
-  // GGUF planes.
-  void stage(metal::CommandGraph &graph, uint32_t block, const Group &group) const;
+  // The index of `weights` among the blocks the split was built from.
+  [[nodiscard]] uint32_t blockOf(const BlockMoeWeights &weights) const;
   // Starts `job` on the ANE through the handoff.
   void queue(const Job &job);
   // Logs, once, that the split stopped.
   void warnStopped();
 
   metal::MetalBackend &backend_;
+  // The blocks the split was built from, which outlive it: each application's
+  // weights find their group here.
+  std::span<const BlockMoeWeights> blocks_;
   MoeShape shape_;
   Plan plan_;
   std::vector<Group> groups_;
