@@ -613,8 +613,8 @@ RuntimeResources::RuntimeResources(
     std::unique_ptr<model::QwenStateStorage> stateStorage,
     std::unique_ptr<KvPageTier> kvTier, std::unique_ptr<DiskSpace> diskSpace,
     std::unique_ptr<KvPool> kvPool, std::unique_ptr<engine::Cache> cache,
-    AneFfnStart aneFfn, std::unique_ptr<ops::AneMoe> aneMoe, kv::Format kvFormat, std::string buildId,
-    std::function<bool()> cancelled,
+    AneFfnStart aneFfn, std::unique_ptr<ops::AneMoe> aneMoe, std::string aneMoeKey, kv::Format kvFormat,
+    std::string buildId, std::function<bool()> cancelled,
     std::unique_ptr<model::KvBlockCache> blockCache,
     std::unique_ptr<model::KvHistoryStream> historyStream, bool spillAlways,
     model::VerifyRows verifyRows)
@@ -628,6 +628,7 @@ RuntimeResources::RuntimeResources(
       stateStorage_(std::move(stateStorage)), kvTier_(std::move(kvTier)),
       diskSpace_(std::move(diskSpace)), kvPool_(std::move(kvPool)),
       cache_(std::move(cache)), aneFfn_(std::move(aneFfn.split)), aneMoe_(std::move(aneMoe)),
+      aneMoeKey_(std::move(aneMoeKey)),
       blockCache_(std::move(blockCache)), historyStream_(std::move(historyStream)),
       // The split serves from the start or once set up (finishAneFfn), until
       // the engine ends.
@@ -1068,6 +1069,7 @@ RuntimeResources::create(const RuntimeResourcesConfig &config,
       config.aneMoeExperts && config.aneMoeCapacity ? model::moeBlocks(loaded) : model::MoeBlocks{};
   std::optional<ops::AneMoe::Plan> moePlan;
   uint64_t aneMoeBytes = 0;
+  std::string aneMoeKey;
   if (!moeSplit.blocks.empty()) {
     const std::vector<ops::MoeShape> shapes(moeSplit.blocks.size(), moeSplit.shape);
     const ops::AneMoe::Selection selection{.experts = config.aneMoeExperts,
@@ -1078,7 +1080,18 @@ RuntimeResources::create(const RuntimeResourcesConfig &config,
       throw RuntimeResourcesError(RuntimeResourceStage::Configuration,
                                   "the Neural Engine MoE split's capacity is not whole quanta of " +
                                       std::to_string(ops::AneMoe::kCapacityQuantum) + " rows", {});
-    const ops::AneMoe::Plan plan = ops::AneMoe::plan(shapes, {}, selection);
+    // The experiments kept for this Mac, build and model, from the runs
+    // before: the residents are the experts they saw most routes reach.
+    aneMoeKey = ops::AneMoe::calibrationKey(moeSplit.blocks, moeSplit.shape) + " device " +
+                backend->capabilities().deviceName + " macos " +
+                std::string([[NSProcessInfo processInfo] operatingSystemVersionString].UTF8String) + " build " +
+                config.buildId;
+    ops::AneMoe::Loads moeLoads;
+    if (const std::optional<std::string> line = ane::recall(aneMoeKey))
+      moeLoads = ops::AneMoe::parseLoads(*line, static_cast<uint32_t>(moeSplit.blocks.size()),
+                                         moeSplit.shape.experts)
+                     .value_or(ops::AneMoe::Loads{});
+    const ops::AneMoe::Plan plan = ops::AneMoe::plan(shapes, moeLoads, selection);
     if (plan.rows() != plannedTarget.aneMoeRows)
       throw std::logic_error("the Neural Engine MoE split's rows are not the arena's region");
     aneMoeBytes = ops::AneMoe::plannedBytes(moeSplit.shape, plan, static_cast<uint32_t>(moeSplit.blocks.size()));
@@ -1403,8 +1416,9 @@ RuntimeResources::create(const RuntimeResourcesConfig &config,
         std::move(operators), std::move(memoryPlan), std::move(cacheIdentity),
         std::move(memoryGovernor), startClaim, std::move(startScope), std::move(kvPages), std::move(stateStorage),
         std::move(kvTier), std::move(disk.space), std::move(kvPool), std::move(cache),
-        std::move(aneFfn), std::move(aneMoe), config.kvFormat, config.buildId, config.cancelled,
-        std::move(blockCache), std::move(historyStream), config.kvSpillAlways, config.verifyRows));
+        std::move(aneFfn), std::move(aneMoe), std::move(aneMoeKey), config.kvFormat, config.buildId,
+        config.cancelled, std::move(blockCache), std::move(historyStream), config.kvSpillAlways,
+        config.verifyRows));
     result->adoptPersistentCache();
     return result;
   } catch (const RuntimeResourcesError &) {
@@ -1427,6 +1441,14 @@ RuntimeResources::create(const RuntimeResourcesConfig &config,
 }
 
 RuntimeResources::~RuntimeResources() {
+  // What the split's marks counted, for the next start's plan.
+  if (aneMoe_ && !aneMoeKey_.empty()) {
+    const ops::AneMoe::Loads &loads = aneMoe_->loads();
+    bool seen = false;
+    for (const std::vector<uint64_t> &block : loads)
+      for (const uint64_t count : block) seen |= count != 0;
+    if (seen) static_cast<void>(ane::remember(aneMoeKey_, ops::AneMoe::encodeLoads(loads)));
+  }
   stopProbation();
   if (persistentCache_.directory) {
     persistentCache_.kv->seal();

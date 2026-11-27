@@ -9,6 +9,7 @@
 #include "ops/BufferExtent.hpp"
 
 #include <algorithm>
+#include <charconv>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -361,6 +362,11 @@ AneMoe::AneMoe(metal::MetalBackend &backend, std::span<const BlockMoeWeights *co
   scaled_ = buffer(uint64_t{rows} * hidden * sizeof(_Float16), "ane moe scaled rows");
   status_ = buffer(sizeof(uint32_t), "ane moe status");
   *static_cast<uint32_t *>(status_.contents()) = 0;
+  // The routes each block's experts take, which finish() reads: the counts a
+  // next start plans its residents from.
+  counts_ = buffer(uint64_t{blocks.size()} * shape_.experts * sizeof(uint32_t), "ane moe expert counts");
+  std::memset(counts_.contents(), 0, counts_.sizeBytes());
+  loads_.assign(blocks.size(), std::vector<uint64_t>(shape_.experts, 0));
   x_ = surface(hidden, rows, Element::Int8);
   tx_ = surface(1, rows, Element::Float16);
   y_ = surface(hidden, rows, Element::Float16);
@@ -500,8 +506,8 @@ void AneMoe::addRouting(metal::CommandGraph &graph, const MoeBuffers &buffers, c
             AneMoeClearParams{shape.experts, plan_.rows(), 0}, {1, 1, 1});
   graph.add("ane_moe_mark",
             {buffers.scratch.selectedExperts, buffers.scratch.routeRows, group.baseTable, group.capacityTable,
-             cursors_, routeList_},
-            AneMoeMarkParams{static_cast<uint32_t>(routes), shape.experts, static_cast<uint32_t>(routes)},
+             cursors_, routeList_, counts_},
+            AneMoeMarkParams{static_cast<uint32_t>(routes), shape.experts, static_cast<uint32_t>(routes), block},
             {(static_cast<uint32_t>(routes) + 255) / 256, 1, 1});
   graph.add("ane_moe_scale", {buffers.input, routeList_, scaled_, tx_.buffer},
             AneMoeScaleParams{shape.routesPerToken(), shape.hiddenSize, 0, plan_.rows()}, {plan_.rows(), 1, 1});
@@ -570,9 +576,46 @@ bool AneMoe::finish(const metal::CommandTiming &) {
     warnStopped();
     return false;
   }
+  // The routes this command's marks counted, added to the split's, and the
+  // buffer cleared for the next command's command to write.
+  if (const auto *counts = static_cast<const uint32_t *>(counts_.contents())) {
+    for (size_t block = 0; block < loads_.size(); ++block)
+      for (uint32_t expert = 0; expert < loads_[block].size(); ++expert)
+        loads_[block][expert] += counts[block * loads_[block].size() + expert];
+    std::memset(counts_.contents(), 0, counts_.sizeBytes());
+  }
   ++served_.commands;
   served_.evaluations += committedApplications_;
   return true;
+}
+
+std::string AneMoe::encodeLoads(const Loads &loads) {
+  std::string line = "ane-moe loads";
+  for (const std::vector<uint64_t> &block : loads)
+    for (const uint64_t count : block) line += " " + std::to_string(count);
+  return line;
+}
+
+std::optional<AneMoe::Loads> AneMoe::parseLoads(std::string_view line, uint32_t blocks, uint32_t experts) {
+  constexpr std::string_view prefix = "ane-moe loads";
+  if (line.substr(0, prefix.size()) != prefix) return std::nullopt;
+  line.remove_prefix(prefix.size());
+  Loads loads(blocks, std::vector<uint64_t>(experts, 0));
+  size_t read = 0;
+  while (!line.empty()) {
+    const size_t start = line.find_first_not_of(' ');
+    if (start == std::string_view::npos) break;
+    line.remove_prefix(start);
+    if (read == uint64_t{blocks} * experts) return std::nullopt;
+    uint64_t count = 0;
+    const auto [end, error] = std::from_chars(line.data(), line.data() + line.size(), count);
+    if (error != std::errc{}) return std::nullopt;
+    loads[read / experts][read % experts] = count;
+    ++read;
+    line.remove_prefix(static_cast<size_t>(end - line.data()));
+  }
+  if (read != uint64_t{blocks} * experts) return std::nullopt;
+  return loads;
 }
 
 bool AneMoe::release() {

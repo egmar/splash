@@ -403,6 +403,22 @@ void stepChecks(MetalBackend &backend) {
     difference += (b - a) * (b - a);
     scale += a * a;
   }
+  // The mark's counts: every route of the step, its resident experts' with
+  // the engine's, and the loads a next start plans from, which round-trip.
+  const AneMoe::Loads &loads = split.loads();
+  uint64_t counted = 0;
+  for (uint32_t expert = 0; expert < block.experts; ++expert) {
+    const auto expected = static_cast<uint64_t>(std::count(alone.selected.begin(), alone.selected.end(), expert));
+    counted += loads.front()[expert];
+    if (loads.front()[expert] != expected)
+      fail("expert " + std::to_string(expert) + " counted " + std::to_string(loads.front()[expert]) + " routes, not " +
+           std::to_string(expected));
+  }
+  if (counted != alone.selected.size()) fail("the counts are not the step's routes");
+  if (AneMoe::parseLoads(AneMoe::encodeLoads(loads), 1, block.experts) != loads)
+    fail("the loads do not round-trip through their line");
+  if (AneMoe::parseLoads("ane-moe loads 1 2", 1, block.experts).has_value())
+    fail("a short line parsed as loads");
   const double error = scale > 0.0 ? std::sqrt(difference / scale) : 0.0;
   std::cout << "  step: " << ane << " of " << alone.selected.size() << " routes on the engine, output differs by "
             << 100.0 * error << "%\n";

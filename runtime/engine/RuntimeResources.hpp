@@ -387,8 +387,8 @@ private:
                    std::unique_ptr<DiskSpace> diskSpace,
                    std::unique_ptr<KvPool> kvPool,
                    std::unique_ptr<engine::Cache> cache,
-                   AneFfnStart aneFfn, std::unique_ptr<ops::AneMoe> aneMoe, kv::Format kvFormat,
-                   std::string buildId, std::function<bool()> cancelled,
+                   AneFfnStart aneFfn, std::unique_ptr<ops::AneMoe> aneMoe, std::string aneMoeKey,
+                   kv::Format kvFormat, std::string buildId, std::function<bool()> cancelled,
                    std::unique_ptr<model::KvBlockCache> blockCache,
                    std::unique_ptr<model::KvHistoryStream> historyStream, bool spillAlways,
                    model::VerifyRows verifyRows);
@@ -422,6 +422,8 @@ private:
   // The prefill MoE's split, built before the runtime whose step scratch its
   // region sizes (model::moeBlocks, RuntimeContext::aneMoe).
   std::unique_ptr<ops::AneMoe> aneMoe_;
+  // The key its marks' counts are kept under (ops::AneMoe::calibrationKey).
+  std::string aneMoeKey_;
   // A spill-capable target's readers of its spilled KV; none for another.
   std::unique_ptr<model::KvBlockCache> blockCache_;
   std::unique_ptr<model::KvHistoryStream> historyStream_;

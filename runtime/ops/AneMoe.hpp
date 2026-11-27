@@ -72,8 +72,14 @@ public:
     [[nodiscard]] bool empty() const noexcept { return !experts || !capacity; }
   };
 
-  // Each block's routed-expert counts over a calibration corpus: counts[block][expert].
+  // Each block's routed-expert counts: counts[block][expert], over a corpus
+  // or the runs since the split was built (loads()).
   using Loads = std::vector<std::vector<uint64_t>>;
+  // `loads` as a line to keep under a calibration key (ane::remember), and
+  // the loads of `line` of `blocks` blocks of `experts` experts each; none
+  // when the line is not one encodeLoads wrote.
+  [[nodiscard]] static std::string encodeLoads(const Loads &loads);
+  [[nodiscard]] static std::optional<Loads> parseLoads(std::string_view line, uint32_t blocks, uint32_t experts);
 
   // The best plan a budget of resident int8 weights buys over `loads`: a
   // grid of expert counts and capacities, by the routes it holds of the
@@ -129,6 +135,10 @@ public:
     uint64_t commands = 0, evaluations = 0;
   };
   [[nodiscard]] const Served &served() const noexcept { return served_; }
+  // The routes each block's experts took since the split was built, as its
+  // mark counted them (both the engine's and the GPU's): what the next start
+  // plans the residents from, or a corpus's counts do.
+  [[nodiscard]] const Loads &loads() const noexcept { return loads_; }
   // The rows a block's group joins after the routes of each step's expert
   // outputs (MoeConfig::aneRows, MoeWorkspace::expertOutputBytes): every
   // resident block's group holds them, and 0 when the split takes no block.
@@ -221,7 +231,9 @@ private:
   // The chunk scratch every application writes: the marks' cursors, the
   // packed columns' route list and scales, the rows the pack transposes, the
   // ANE's input and output surfaces, and the status word the join sets.
-  metal::MetalBuffer cursors_, routeList_, scaled_, status_;
+  metal::MetalBuffer cursors_, routeList_, scaled_, status_, counts_;
+  // The routes the marks counted, as the host read them in finish().
+  Loads loads_;
   ane::Surface x_, tx_, y_;
   std::unique_ptr<ane::Program> program_;
   // The rows of the command being encoded, and its applications: `jobs_`

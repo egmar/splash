@@ -41,11 +41,14 @@ struct AneMoeJoinParams {
 
 // The routes of a group's experts whose routes fit their experts' capacities
 // leave the GPU: `selected[route]` becomes ANE_MOE_ROUTE_NONE and
-// `route_rows[route]` the row the ANE's result joins at.
+// `route_rows[route]` the row the ANE's result joins at. Every route of an
+// expert below `experts` counts in `counts` at `block * experts + expert`,
+// which a start reads to learn which experts are hot (AneMoe::loads).
 struct AneMoeMarkParams {
   uint32_t routes;
   uint32_t experts;
   uint32_t rows_offset;
+  uint32_t block;
 };
 
 // A group's cursors, scales and route list: the per-expert packed-row counters
@@ -77,4 +80,5 @@ struct AneMoeWeightParams {
 };
 
 static_assert(sizeof(AneMoeClearParams) == 12, "ANE MoE clear parameters are 12 bytes");
+static_assert(sizeof(AneMoeMarkParams) == 16, "ANE MoE mark parameters are 16 bytes");
 static_assert(sizeof(AneMoeWeightParams) == 36, "ANE MoE weight parameters are 36 bytes");

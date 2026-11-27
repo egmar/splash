@@ -27,10 +27,14 @@ kernel void ane_moe_clear(device uint *cursors [[buffer(0)]], device half *scale
 kernel void ane_moe_mark(device uint *selected [[buffer(0)]], device uint *route_rows [[buffer(1)]],
                          device const uint *expert_base [[buffer(2)]], device const uint *expert_capacity [[buffer(3)]],
                          device atomic_uint *cursors [[buffer(4)]], device uint *route_list [[buffer(5)]],
-                         constant AneMoeMarkParams &p [[buffer(6)]], uint index [[thread_position_in_grid]]) {
+                         device atomic_uint *counts [[buffer(6)]], constant AneMoeMarkParams &p [[buffer(7)]],
+                         uint index [[thread_position_in_grid]]) {
   if (index >= p.routes) return;
   const uint expert = selected[index];
   if (expert >= p.experts) return;  // a shared slice, or the ANE's already
+  // What the routing chose, before the engine takes its share: a start reads
+  // it to plan which experts to hold.
+  atomic_fetch_add_explicit(&counts[p.block * p.experts + expert], 1u, memory_order_relaxed);
   const uint base = expert_base[expert];
   if (base == ANE_MOE_EXPERT_ABSENT) return;
   const uint slot = atomic_fetch_add_explicit(&cursors[expert], 1u, memory_order_relaxed);
