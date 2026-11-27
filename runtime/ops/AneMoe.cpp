@@ -498,8 +498,13 @@ uint32_t AneMoe::blockOf(const BlockMoeWeights &weights) const {
   return static_cast<uint32_t>(found - blocks_.begin());
 }
 
+uint32_t AneMoe::minimumRows() const noexcept {
+  return plan_.empty() ? kMinimumRows
+                       : std::max(kMinimumRows, roundUp(plan_.rows() / 8, kCapacityQuantum));
+}
+
 bool AneMoe::splits(uint32_t rows) const {
-  return !plan_.empty() && rows >= kMinimumRows && rows <= kMaximumRows && !handoff_.retired();
+  return !plan_.empty() && rows >= minimumRows() && rows <= kMaximumRows && !handoff_.retired();
 }
 
 bool AneMoe::begin(uint32_t rows) {

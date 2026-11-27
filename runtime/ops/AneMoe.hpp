@@ -150,8 +150,16 @@ public:
   // What Metal allocated for the split.
   [[nodiscard]] uint64_t allocatedBytes() const noexcept { return allocatedBytes_; }
 
+  // The least rows the split pays at: an eighth of the group's rows, rounded
+  // up, and kMinimumRows at least. The ANE evaluates the group's whole region
+  // whatever a command routes — 8,192 rows take about 18 ms — so a command
+  // whose own GPU work is smaller than that loses by the split: a cached
+  // prefix's 32-row prefill took 1.4 s against 190 ms with 8,192 rows of
+  // region, and the measurements turn over near this floor (480 rows at
+  // 4,096, 1,024 at 8,192).
+  [[nodiscard]] uint32_t minimumRows() const noexcept;
   // Whether the split takes a command of `rows` rows: a prefill chunk from
-  // kMinimumRows up, its evaluations within kMostInFlight, and not once it
+  // minimumRows() up, its evaluations within kMostInFlight, and not once it
   // stopped.
   [[nodiscard]] bool splits(uint32_t rows) const;
   // Whether the split stopped, and why.

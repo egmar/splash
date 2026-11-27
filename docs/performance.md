@@ -145,7 +145,11 @@ its model. `--ane-moe-experts` is the experts each block keeps and
 8,192. Run each configuration twice and read the second run: the first after a
 build learns which experts the routes reach, keeps the counts under the
 build's calibration key, and only the next start plans the residents from
-them. A start says what it took on its log line, and `/status` reports it
+them. A command splits only from about an eighth of its group's rows — 512 at
+4,096, 1,024 at 8,192 — because the ANE evaluates the whole region whatever a
+command routes: a cached prefix's 32-row prefill took 1.4 s with the split
+against 190 ms without it. A start says what it took on its log line, and
+`/status` reports it
 (`ane_moe`: state, copies, rows, blocks, join rows, bytes, commands,
 evaluations, routes), as does a run's last line: `Neural Engine MoE split: 40
 commands, 672 evaluations, 1914573 of 4504704 routes (42.5%)` — on this Mac an

@@ -329,6 +329,16 @@ void splitChecks(MetalBackend &backend) {
         break;
       }
   }
+  // The least rows the split pays at: a group of 4,096 rows (4 experts of
+  // 1,024) refuses the 480-row command whose GPU work is smaller than the
+  // ANE's whole region, and takes 512.
+  {
+    const AneMoe::Plan wide = AneMoe::plan(std::span(&block, 1), loads(),
+                                           AneMoe::Selection{.experts = 4, .capacity = 1024});
+    const AneMoe wideSplit(backend, std::span(blocks), block, wide, {}, {});
+    if (wideSplit.minimumRows() != 512 || wideSplit.splits(480) || !wideSplit.splits(512))
+      fail("a 4,096-row group takes a command below its least rows");
+  }
   // A plan of no block takes no command.
   AneMoe empty(backend, std::span(blocks), block, AneMoe::Plan{}, {}, {});
   if (empty.splits(kRows) || empty.regionRows()) fail("a split of no block takes a command");
