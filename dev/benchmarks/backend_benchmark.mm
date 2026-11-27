@@ -399,6 +399,18 @@ std::vector<uint32_t> prompt(uint32_t length, uint64_t salt, uint32_t vocabulary
   return result;
 }
 
+// The fixtures' tokens as the model's vocabulary takes them: a token of the
+// family the transcript was written in (Qwen3's, for every fixture) is kept,
+// and one past the model's vocabulary, as a MoE target's smaller vocabulary
+// finds another family's, moves into it, the same token each time. The
+// sequences a logits dump scores stay as they are.
+std::vector<uint32_t> familyTokens(std::span<const uint32_t> tokens, uint32_t vocabularySize) {
+  std::vector<uint32_t> result(tokens.begin(), tokens.end());
+  for (uint32_t &token : result)
+    if (token >= vocabularySize) token = 100 + token % std::max<uint32_t>(vocabularySize - 100, 1);
+  return result;
+}
+
 // What each lookup of a cache check found, for its failure: under host
 // memory pressure the engine evicts the cached prefixes the checks reuse.
 std::string lookups(
@@ -1557,7 +1569,8 @@ int main(int argc, char **argv) {
         for (uint32_t index = 0; index < transcriptCases.size(); ++index) {
           const auto [request, context] = transcriptCases[index];
           std::vector<uint32_t> tokens = prompt(context, uint64_t{index} << 32 | 0x5452414e53ULL, capabilities.vocabularySize);
-          const std::span<const uint32_t> question = benchmark::kTranscriptPrompts[request];
+          const std::vector<uint32_t> question =
+              familyTokens(benchmark::kTranscriptPrompts[request], capabilities.vocabularySize);
           tokens.insert(tokens.end(), question.begin(), question.end());
           evictAllCache(resources->cache());
           Measurement result =
@@ -1585,10 +1598,10 @@ int main(int argc, char **argv) {
       } else {
         for (const std::span<const uint32_t> question : benchmark::kTranscriptPrompts) {
           evictAllCache(resources->cache());
-          const Measurement answer =
-              runRequest(engine, driver, *executor, events, progress.get(), requestId++, "logits_answer", 0,
-                         std::vector<uint32_t>(question.begin(), question.end()), kAnswerTokens);
-          std::vector<uint32_t> &sequence = dump.sequences.emplace_back(question.begin(), question.end());
+          const std::vector<uint32_t> tokens = familyTokens(question, capabilities.vocabularySize);
+          const Measurement answer = runRequest(engine, driver, *executor, events, progress.get(), requestId++,
+                                                "logits_answer", 0, tokens, kAnswerTokens);
+          std::vector<uint32_t> &sequence = dump.sequences.emplace_back(tokens);
           sequence.insert(sequence.end(), answer.outputTokens.begin(), answer.outputTokens.end());
         }
         // Prefix by prefix across the sequences, so a group of score requests

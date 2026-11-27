@@ -4,7 +4,10 @@
 //   teacher-logits METALLIB MODEL_ROOT TOKENS OUTPUT --window END:ROWS [--window END:ROWS...]
 //                  [--kv-format int8|bf16] [--state-format fp32|bf16] [--activations auto|bf16]
 //                  [--expert-memory SIZE] [--ple-memory SIZE] [--captures yes] [--draft yes]
-//                  [--captured-rows FILE]
+//                  [--captured-rows FILE] [--ane-moe-experts COUNT --ane-moe-capacity ROWS]
+// --ane-moe-experts and --ane-moe-capacity run the prefill MoE's Neural
+// Engine split, as splash serve's do (ops::AneMoe): COUNT experts of each
+// block of ROWS packed rows each.
 //
 // TOKENS holds little-endian uint32 token ids, read as they are: no BOS, no
 // chat template. For each window a cold request prefills ids [0, END - ROWS)
@@ -49,6 +52,7 @@
 #include "model/RuntimeInstrumentation.hpp"
 #include "model/SsdReaders.hpp"
 #include "ops/PageStorage.hpp"
+#include "ops/AneMoe.hpp"
 #include "tools/LoadOptions.hpp"
 
 #import <Foundation/Foundation.h>
@@ -274,6 +278,7 @@ int main(int argc, char **argv) {
       std::vector<Window> windows;
       bool captures = false, draft = false;
       std::string capturedRows;
+      std::optional<uint32_t> aneMoeExperts, aneMoeCapacity;
       ops::Int8Activations int8Activations = ops::Int8Activations::On;
       kv::Format format = kv::Format::Int8;
       ops::GdnStateFormat stateFormat = ops::GdnStateFormat::Float32;
@@ -304,11 +309,17 @@ int main(int argc, char **argv) {
           if (value != "auto" && value != "bf16")
             throw std::invalid_argument("--activations requires auto or bf16");
           int8Activations = value == "auto" ? ops::Int8Activations::On : ops::Int8Activations::Off;
+        } else if (option == "--ane-moe-experts") {
+          aneMoeExperts = static_cast<uint32_t>(parseNumber(value, "--ane-moe-experts"));
+        } else if (option == "--ane-moe-capacity") {
+          aneMoeCapacity = static_cast<uint32_t>(parseNumber(value, "--ane-moe-capacity"));
         } else if (!tools::takeLoadOption(option, value, loadOptions))
           throw std::invalid_argument("unknown option " + std::string(option));
       }
       if (windows.empty())
         throw std::invalid_argument("no --window given");
+      if (aneMoeExperts.has_value() != aneMoeCapacity.has_value())
+        throw std::invalid_argument("--ane-moe-experts and --ane-moe-capacity go together");
       const std::vector<uint32_t> tokens = readTokens(argv[3]);
       uint32_t lastEnd = 0;
       for (const Window &window : windows)
@@ -342,8 +353,21 @@ int main(int argc, char **argv) {
         require(static_cast<bool>(pages.allocateExtent(extent)), "could not allocate the KV extents");
       model::QwenStateStorage states(backend, governor.allocationAdmission(), model.stateLayout(stateFormat),
                                      nullptr);
+      // The prefill MoE's Neural Engine split, its resident copies built
+      // before the runtime whose step scratch its region sizes.
+      std::unique_ptr<ops::AneMoe> aneMoe;
+      if (aneMoeExperts) {
+        const model::MoeBlocks blocks = model::moeBlocks(model);
+        if (blocks.blocks.empty()) throw std::invalid_argument("this model has no MoE block to split");
+        const std::vector<ops::MoeShape> shapes(blocks.blocks.size(), blocks.shape);
+        aneMoe = std::make_unique<ops::AneMoe>(
+            backend, blocks.blocks, blocks.shape,
+            ops::AneMoe::plan(shapes, {}, {.experts = *aneMoeExperts, .capacity = *aneMoeCapacity}),
+            std::function<bool ()>{});
+      }
       // Every cycle verifies, and so retains, every row of its block.
       model::RuntimeContext context{backend, model, pages, states, operators};
+      context.aneMoe = aneMoe.get();
       context.verifyRows = model::VerifyRows::All;
       model::Runtime executor(context);
 
