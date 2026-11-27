@@ -62,7 +62,7 @@ struct Options final {
   uint32_t hidden = kInklingHidden;
   uint32_t intermediate = kInklingExpert;
   uint32_t minimumGraphRows = 512;
-  bool verify = false;
+  bool verify = true;
   std::string routes;
 };
 
@@ -339,12 +339,12 @@ public:
     return program_.bind(procedure_, inputs, output);
   }
 
-  // One evaluation queued; await() it before reading its output.
+  // One evaluation queued that starts when `event` reaches `wait` and signals
+  // `signal` when done: how a command's join waits for it (AneFfn's handoff).
   std::shared_ptr<GraphCompletion> enqueue(const ane::Program::Binding &binding, metal::SharedEvent &event,
-                                          uint64_t &eventValue) {
-    const uint64_t signal = ++eventValue;
+                                          uint64_t wait, uint64_t signal) {
     const auto completion = std::make_shared<GraphCompletion>();
-    program_.enqueue(binding, event, signal - 1, signal, [completion](bool success) {
+    program_.enqueue(binding, event, wait, signal, [completion](bool success) {
       {
         std::lock_guard lock(completion->mutex);
         completion->succeeded = success;
@@ -354,25 +354,12 @@ public:
     });
     return completion;
   }
-  // Waits for the shared event to reach `value`, which the ANE raises when the
-  // evaluation completes: the order AneFfn's join waits on.
-  static void awaitEvent(metal::SharedEvent &event, uint64_t value) {
-    struct Waiter final {
-      std::mutex mutex;
-      std::condition_variable condition;
-      bool reached = false;
-    };
-    const auto waiter = std::make_shared<Waiter>();
-    event.notify(value, [waiter] {
-      {
-        std::lock_guard lock(waiter->mutex);
-        waiter->reached = true;
-      }
-      waiter->condition.notify_one();
-    });
-    std::unique_lock lock(waiter->mutex);
-    if (!waiter->condition.wait_for(lock, std::chrono::seconds(600), [&] { return waiter->reached; }))
-      throw std::runtime_error("the Neural Engine's event did not reach its value within 600 seconds");
+  // One evaluation queued after the caller's own: await() it before reading
+  // its output.
+  std::shared_ptr<GraphCompletion> enqueue(const ane::Program::Binding &binding, metal::SharedEvent &event,
+                                          uint64_t &eventValue) {
+    const uint64_t signal = ++eventValue;
+    return enqueue(binding, event, signal - 1, signal);
   }
   static void await(const std::shared_ptr<GraphCompletion> &completion) {
     std::unique_lock lock(completion->mutex);
@@ -839,6 +826,10 @@ struct PipelineGroup final {
   GroupWork work;
   metal::MetalBuffer scaled;  // the pack's fp16 rows before the transpose
   std::unique_ptr<Graph> graph;  // one program a group, bound to its own weights
+  // One shared event a group: every evaluation's wait takes a value of its
+  // own, so no other group's signal can release its join.
+  metal::SharedEvent event;
+  uint64_t eventValue = 0, ready = 0, done = 0;
 };
 
 void pipeline(metal::MetalBackend &backend, const Options &options) {
@@ -905,6 +896,7 @@ void pipeline(metal::MetalBackend &backend, const Options &options) {
     // A program a group: bindings of one program that take turns across groups
     // (the dense split alternates two) serve one group's weights here.
     group.graph = std::make_unique<Graph>(static_cast<uint32_t>(group.experts.size()), group.capacity, dims);
+    group.event = backend.newSharedEvent();
     bindGroup(*group.graph, group.work, packed, weights);
     packedRows += group.rows;
   }
@@ -915,55 +907,63 @@ void pipeline(metal::MetalBackend &backend, const Options &options) {
     for (uint32_t route = 0; route < routeCount; ++route) experts[route] = routes.routes[route].expert;
     return experts;
   }();
-  metal::SharedEvent event = backend.newSharedEvent();
-  uint64_t eventValue = 0;
   const uint32_t routeThreadgroups = (routeCount + 255) / 256;
-  std::vector<double> packTimes, aneTimes, joinTimes;
+  std::vector<double> totalTimes;
   uint32_t aneRoutes = 0, fallbackRoutes = 0;
   constexpr int kRepeats = 4;
   for (int repeat = 0; repeat < kRepeats; ++repeat) {
     std::memcpy(selected.contents(), routeExperts.data(), routeExperts.size() * sizeof(uint32_t));
     // Clear the cursors once, and each group's scales before its pack.
-    metal::CommandGraph pack;
-    pack.add("ane_moe_clear", {cursors, groups.front().work.tx.buffer, routeList},
-             AneMoeClearParams{dims.experts, 0, groups.front().base}, {1, 1, 1});
+    metal::CommandGraph command;
+    command.add("ane_moe_clear", {cursors, groups.front().work.tx.buffer, routeList},
+                AneMoeClearParams{dims.experts, 0, groups.front().base}, {1, 1, 1});
     for (const PipelineGroup &group : groups)
-      pack.add("ane_moe_clear", {cursors, group.work.tx.buffer, routeList},
-               AneMoeClearParams{0, group.rows, group.base}, {1, 1, 1});
-    pack.add("ane_moe_mark", {selected, routeRows, baseTable, capacityTable, cursors, routeList},
-             AneMoeMarkParams{routeCount, dims.experts, rowsOffset}, {routeThreadgroups, 1, 1});
+      command.add("ane_moe_clear", {cursors, group.work.tx.buffer, routeList},
+                  AneMoeClearParams{0, group.rows, group.base}, {1, 1, 1});
+    command.add("ane_moe_mark", {selected, routeRows, baseTable, capacityTable, cursors, routeList},
+                AneMoeMarkParams{routeCount, dims.experts, rowsOffset}, {routeThreadgroups, 1, 1});
     for (const PipelineGroup &group : groups) {
-      pack.add("ane_moe_scale", {chunkRows, routeList, group.scaled, group.work.tx.buffer},
-               AneMoeScaleParams{dims.topK, dims.hidden, group.base, group.rows}, {group.rows, 1, 1});
-      pack.add("ane_ffn_pack", {group.scaled, group.work.x.buffer},
-               AneFfnPackParams{dims.hidden, 0, group.work.x.strideBytes},
-               {(group.rows + ANE_FFN_TILE - 1) / ANE_FFN_TILE, dims.hidden / ANE_FFN_TILE, 1},
-               {ANE_FFN_TILE, ANE_FFN_TILE_ROWS, 1});
+      command.add("ane_moe_scale", {chunkRows, routeList, group.scaled, group.work.tx.buffer},
+                  AneMoeScaleParams{dims.topK, dims.hidden, group.base, group.rows}, {group.rows, 1, 1});
+      command.add("ane_ffn_pack", {group.scaled, group.work.x.buffer},
+                  AneFfnPackParams{dims.hidden, 0, group.work.x.strideBytes},
+                  {(group.rows + ANE_FFN_TILE - 1) / ANE_FFN_TILE, dims.hidden / ANE_FFN_TILE, 1},
+                  {ANE_FFN_TILE, ANE_FFN_TILE_ROWS, 1});
     }
-    const auto packStart = Clock::now();
-    static_cast<void>(backend.submitCommandAsync(pack.dispatches()).wait());
-    const auto packEnd = Clock::now();
-    const auto aneStart = Clock::now();
-    for (const PipelineGroup &group : groups) group.graph->evaluate(*group.work.binding, event, eventValue);
-    const auto aneEnd = Clock::now();
-
-    metal::CommandGraph join;
-    for (const PipelineGroup &group : groups)
-      join.add("ane_moe_join", {group.work.y.buffer, routeList, expertOutput},
-               AneMoeJoinParams{rowsOffset, group.base, group.rows, dims.hidden, group.work.y.strideBytes / 2},
-               {group.rows, 1, 1});
-    const auto joinStart = Clock::now();
-    static_cast<void>(backend.submitCommandAsync(join.dispatches()).wait());
-    const auto joinEnd = Clock::now();
+    // The ANE starts once the chunk's rows are packed (the command's signal)
+    // and each group's join waits inside the command for its evaluation: the
+    // order AneFfn's handoff keeps, which makes the ANE's writes visible to
+    // the GPU's reads.
+    for (PipelineGroup &group : groups) {
+      group.ready = group.eventValue += 1;
+      group.done = group.eventValue += 1;
+      command.signal(group.event, group.ready);
+    }
+    for (size_t index = 0; index < groups.size(); ++index) {
+      command.wait(groups[index].event, groups[index].done);
+      command.add("ane_moe_join", {groups[index].work.y.buffer, expertOutput},
+                  AneMoeJoinParams{rowsOffset, groups[index].base, groups[index].rows, dims.hidden,
+                                   groups[index].work.y.strideBytes / 2},
+                  {groups[index].rows, 1, 1});
+    }
+    const auto start = Clock::now();
+    auto ticket = backend.submitCommandAsync(command.command());
+    std::vector<std::shared_ptr<GraphCompletion>> completions;
+    completions.reserve(groups.size());
+    for (size_t index = 0; index < groups.size(); ++index)
+      completions.push_back(groups[index].graph->enqueue(*groups[index].work.binding, groups[index].event,
+                                                         groups[index].ready, groups[index].done));
+    static_cast<void>(ticket.wait());
+    // The service's reports, as AneFfn's finish() waits for them: the next
+    // application reuses the program, whose intermediate memory its
+    // evaluations share.
+    for (const auto &completion : completions) Graph::await(completion);
+    const auto end = Clock::now();
+    if (repeat) totalTimes.push_back(Seconds(end - start).count() * 1e3);
     if (!repeat) {
       const auto *marked = static_cast<const uint32_t *>(selected.contents());
       for (uint32_t route = 0; route < routeCount; ++route)
         (marked[route] == ANE_MOE_ROUTE_NONE ? aneRoutes : fallbackRoutes)++;
-    }
-    if (repeat) {  // the first repeat compiles the pipelines
-      packTimes.push_back(Seconds(packEnd - packStart).count() * 1e3);
-      aneTimes.push_back(Seconds(aneEnd - aneStart).count() * 1e3);
-      joinTimes.push_back(Seconds(joinEnd - joinStart).count() * 1e3);
     }
   }
 
@@ -978,10 +978,9 @@ void pipeline(metal::MetalBackend &backend, const Options &options) {
   const auto *rows = static_cast<const uint32_t *>(routeRows.contents());
   const auto *out = static_cast<const __bf16 *>(expertOutput.contents());
   uint32_t sampled = 0;
-  // The ANE's rows against the fp32 expert FFN. Off by default: the pipeline's
-  // reads of the ANE's outputs across a command boundary are stale until the
-  // join waits inside the command, as AneFfn's does (see the plan's Phase 2
-  // notes) -- the mapping checks below hold regardless.
+  // The ANE's rows against the fp32 expert FFN, 64 of them: the pipeline's
+  // joins wait inside the command for their evaluations, as AneFfn's do, so
+  // the ANE's outputs are what the command's joins read.
   for (uint32_t route = 0; options.verify && route < routeCount && sampled < 64; ++route) {
     if (selectedValues[route] != ANE_MOE_ROUTE_NONE) continue;
     const uint32_t row = rows[route];
@@ -993,15 +992,22 @@ void pipeline(metal::MetalBackend &backend, const Options &options) {
     if (!owner) throw std::runtime_error("join row outside every group");
     const auto *y = static_cast<const _Float16 *>(owner->work.y.buffer.contents());
     const uint64_t stride = owner->work.y.strideBytes / 2;
+    const uint32_t local = column - owner->base;
     const uint32_t expert = routes.routes[route].expert;
     const uint32_t token = route / dims.topK;
     const std::vector<float> expected = expertForward(weights.at(expert), input, token, dims);
     double error = 0, magnitude = 0;
     for (uint32_t dim = 0; dim < dims.hidden; ++dim) {
       const __bf16 joined = out[uint64_t{row} * dims.hidden + dim];
-      const __bf16 ane = __bf16(float(y[uint64_t{dim} * stride + column]));
-      if (std::bit_cast<uint16_t>(joined) != std::bit_cast<uint16_t>(ane))
+      const __bf16 ane = __bf16(float(y[uint64_t{dim} * stride + local]));
+      if (std::bit_cast<uint16_t>(joined) != std::bit_cast<uint16_t>(ane)) {
+        const auto *listNow = static_cast<const uint32_t *>(routeList.contents());
+        std::printf("join mismatch: route %u row %u col %u local %u dim %u joined %.6f ane %.6f expected %.6f "
+                    "routeRows %u list[col] %u\n",
+                    route, row, column, local, dim, double(float(joined)), double(float(ane)),
+                    double(expected[dim]), rows[route], listNow[column]);
         throw std::runtime_error("join wrote another value than the ANE's output");
+      }
       const double difference = double(float(joined)) - double(expected[dim]);
       error += difference * difference;
       magnitude += double(expected[dim]) * double(expected[dim]);
@@ -1015,11 +1021,11 @@ void pipeline(metal::MetalBackend &backend, const Options &options) {
     std::sort(values.begin(), values.end());
     return values[values.size() / 2];
   };
-  const double packMs = median(packTimes), aneMs = median(aneTimes), joinMs = median(joinTimes);
+  const double totalMs = median(totalTimes);
   std::printf("pipeline: rows=%u E=%u topK=%u groups=%zu ane=%u fallback=%u capacityRows=%u overflow=%llu "
-              "sampled=%u pack=%.3f ms ane=%.3f ms join=%.3f ms total=%.3f ms\n",
+              "sampled=%u total=%.3f ms\n",
               routes.rows, dims.experts, dims.topK, groups.size(), aneRoutes, fallbackRoutes, aneRows,
-              static_cast<unsigned long long>(overflow), sampled, packMs, aneMs, joinMs, packMs + aneMs + joinMs);
+              static_cast<unsigned long long>(overflow), sampled, totalMs);
 }
 
 Options parseOptions(int argc, char **argv, int begin) {

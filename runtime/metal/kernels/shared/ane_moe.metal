@@ -74,16 +74,14 @@ kernel void ane_moe_scale(device const bfloat *input [[buffer(0)]], device const
 }
 
 // One copy a group: its ANE output rows into the routes' expert-output rows,
-// where the combine multiplies them by the routes' weights. A route of another
-// group, or none, writes nothing.
-kernel void ane_moe_join(device const half *ane_output [[buffer(0)]], device const uint *route_list [[buffer(1)]],
-                         device bfloat *expert_output [[buffer(2)]], constant AneMoeJoinParams &p [[buffer(3)]],
-                         uint2 group [[threadgroup_position_in_grid]],
+// where the combine multiplies them by the routes' weights. Every column is
+// copied, padding's included: a padding column's scales are zero, so its rows
+// are zero, and no route's route_rows names them.
+kernel void ane_moe_join(device const half *ane_output [[buffer(0)]], device bfloat *expert_output [[buffer(1)]],
+                         constant AneMoeJoinParams &p [[buffer(2)]], uint2 group [[threadgroup_position_in_grid]],
                          uint thread_index [[thread_index_in_threadgroup]]) {
   const uint column = group.x;
   if (column >= p.group_rows) return;
-  const uint route = route_list[p.base + column];
-  if (route == ANE_MOE_ROUTE_NONE) return;
   const uint row = p.rows_offset + p.base + column;
   for (uint dim = thread_index; dim < p.hidden; dim += 256)
     expert_output[ulong(row) * p.hidden + dim] = bfloat(float(ane_output[ulong(dim) * p.stride + column]));
