@@ -872,7 +872,7 @@ test-real: preflight $(TARGET) $(TEST_MODEL_RUNTIME_ORACLE) \
 	$(TEST_MODEL_RUNTIME_ORACLE) $(LIB) "$(MODEL_ROOT)" --ane-ffn-share 0 --lanes 8 --siblings-only $(ORACLE_ARGS)
 
 .PHONY: benchmark-backend \
-	benchmark-decode-profile benchmark-attention-sweep \
+	benchmark-decode-profile benchmark-attention-sweep benchmark-ane-compare \
 	benchmark-gguf-projection benchmark-gguf-moe benchmark-ane-moe teacher-logits
 # decode-profile replays the installed model's prefill and decode commands as
 # separate dispatches; DECODE_PROFILE_ARGS passes --prompt-tokens/--cycles,
@@ -919,6 +919,12 @@ benchmark-ane-moe: $(TEST_ANE_MOE_BENCHMARK) $(LIB)
 # Neural Engine split: BACKEND_ARGS="--ane-moe-experts 8 --ane-moe-capacity 1024".
 benchmark-backend: preflight $(TARGET) $(TEST_BACKEND_BENCHMARK) $(LIB)
 	$(TEST_BACKEND_BENCHMARK) $(LIB) "$(MODEL_ROOT)" $(BACKEND_ARGS)
+
+# The same scenarios alone and with the prefill MoE's Neural Engine split,
+# compared in one command: COMPARE_ARGS passes compare_ane's options
+# (--scenario short,partial, --experts, --capacity, --context-lengths).
+benchmark-ane-compare: preflight $(TARGET) $(TEST_BACKEND_BENCHMARK) $(LIB)
+	$(PYTHON) -m dev.benchmarks.compare_ane $(LIB) "$(MODEL_ROOT)" $(COMPARE_ARGS)
 
 # CPU tests that also run under the sanitizers: each is built three times
 # from the same sources, once as the CPU tests above are and once under each
