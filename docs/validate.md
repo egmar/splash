@@ -38,6 +38,13 @@ also fails when a workflow under `.github/workflows` names a Hugging Face token
 (`HF_TOKEN`, `HUGGING_FACE_HUB_TOKEN` or a `secrets.HF_*` secret): CI installs
 public models alone and never receives one.
 
+Some Metal validation compilers cannot build the `MetalPerformancePrimitives` `matmul2d`
+pipelines that the GGUF, dense and MoE kernels use: on an M4 Pro with macOS 27.3 (AGX G16X)
+the first such pipeline a kernel test reaches fails with `AGXMetalG16X` "expression could
+not be resolved to a constant at device compile time", while the same metallib and function
+build without validation, Apple's own `matmul2d` sample included. There, run the kernel
+tests without that check, and say so: `make METAL_TEST_ENV= test-engine-metal`.
+
 The native tests are in `dev/tests/engine` and the desktop app's in
 `app/Tests`; each Python test is in the directory of what it tests:
 `dev/tests/server`, `dev/tests/install` (launcher, client configuration and
