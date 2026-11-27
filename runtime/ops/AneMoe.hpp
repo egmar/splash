@@ -131,10 +131,11 @@ public:
 
   [[nodiscard]] const Plan &plan() const noexcept { return plan_; }
   [[nodiscard]] const MoeShape &shape() const noexcept { return shape_; }
-  // The commands finish() found split since the split was built, and their
-  // evaluations.
+  // The commands finish() found split since the split was built, their
+  // evaluations, and the routes they held: every route an application's
+  // routing chose, and those the engine took (the rest the GPU's).
   struct Served final {
-    uint64_t commands = 0, evaluations = 0;
+    uint64_t commands = 0, evaluations = 0, routes = 0, taken = 0;
   };
   [[nodiscard]] const Served &served() const noexcept { return served_; }
   // The routes each block's experts took, as its mark counted them (both the
@@ -234,7 +235,7 @@ private:
   // The chunk scratch every application writes: the marks' cursors, the
   // packed columns' route list and scales, the rows the pack transposes, the
   // ANE's input and output surfaces, and the status word the join sets.
-  metal::MetalBuffer cursors_, routeList_, scaled_, status_, counts_;
+  metal::MetalBuffer cursors_, routeList_, scaled_, status_, counts_, taken_;
   // The routes the marks counted, as the host read them in finish().
   Loads loads_;
   ane::Surface x_, tx_, y_;
@@ -245,6 +246,9 @@ private:
   std::vector<Job> jobs_;
   std::optional<uint32_t> pending_;
   uint32_t committedApplications_ = 0;
+  // The routes the command being encoded has added, and the routes of the one
+  // committed last.
+  uint64_t addedRoutes_ = 0, committedRoutes_ = 0;
   // Whether a command committed jobs that finish() has not yet judged.
   bool unfinished_ = false;
   bool released_ = false;

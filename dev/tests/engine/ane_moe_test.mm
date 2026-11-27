@@ -417,6 +417,13 @@ void stepChecks(MetalBackend &backend) {
     difference += (b - a) * (b - a);
     scale += a * a;
   }
+  // What the split served: the step's routes, and how many of them it took.
+  if (split.served().taken != ane)
+    fail("the split served " + std::to_string(split.served().taken) + " routes, not the " + std::to_string(ane) +
+         " the engine took");
+  if (split.served().routes != alone.selected.size())
+    fail("the split routed " + std::to_string(split.served().routes) + " routes, not the step's " +
+         std::to_string(alone.selected.size()));
   // The mark's counts: every route of the step, its resident experts' with
   // the engine's, and the loads a next start plans from, which round-trip.
   const AneMoe::Loads &loads = split.loads();

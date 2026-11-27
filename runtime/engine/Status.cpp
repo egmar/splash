@@ -67,7 +67,9 @@ void writeAneMoe(json::Writer &w, const AneMoeSnapshot &split) {
         .field("reason", split.reason)
         .field("bytes", split.allocatedBytes)
         .field("split_commands", split.commands)
-        .field("evaluations", split.evaluations);
+        .field("evaluations", split.evaluations)
+        .field("routes", split.routes)
+        .field("ane_routes", split.taken);
   });
 }
 

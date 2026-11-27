@@ -19,9 +19,11 @@ struct AneMoeSnapshot {
   // The rows each step's expert outputs hold for its join
   // (ops::AneMoe::regionRows).
   uint32_t joinRows = 0;
-  // What it allocated, and what it ran (ops::AneMoe::Served).
+  // What it allocated, and what it ran (ops::AneMoe::Served): its commands,
+  // their evaluations, and the routes it held of the ones they routed.
   uint64_t allocatedBytes = 0;
-  uint64_t commands = 0, evaluations = 0;
+  uint64_t commands = 0, evaluations = 0, routes = 0;
+  uint64_t taken = 0;
 };
 
 } // namespace splash::engine

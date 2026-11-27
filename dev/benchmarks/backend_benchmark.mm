@@ -1831,6 +1831,19 @@ int main(int argc, char **argv) {
                    measurement.promptTokens, measurement.prefillGpuMilliseconds, perSecond,
                    measurement.ttftMilliseconds, measurement.cacheStatus.c_str());
     }
+    // What the split did, not just what it was given: its commands, their
+    // evaluations, and the routes it held of every route they routed.
+    const engine::AneMoeSnapshot moe = resources->aneMoeSnapshot();
+    if (moe.state != engine::AneMoeSnapshot::State::Off) {
+      if (moe.routes)
+        std::fprintf(stderr, "Neural Engine MoE split: %llu commands, %llu evaluations, %llu of %llu routes (%.1f%%)\n",
+                     static_cast<unsigned long long>(moe.commands), static_cast<unsigned long long>(moe.evaluations),
+                     static_cast<unsigned long long>(moe.taken), static_cast<unsigned long long>(moe.routes),
+                     100.0 * static_cast<double>(moe.taken) / static_cast<double>(moe.routes));
+      else
+        std::fprintf(stderr, "Neural Engine MoE split: %llu commands, %llu evaluations, no routes yet\n",
+                     static_cast<unsigned long long>(moe.commands), static_cast<unsigned long long>(moe.evaluations));
+    }
     std::fprintf(stderr, "decode warmup (GPU ms, 1..%zu lanes):", decodeWarmupGpu.size());
     for (const double milliseconds : decodeWarmupGpu)
       std::fprintf(stderr, " %.0f", milliseconds);

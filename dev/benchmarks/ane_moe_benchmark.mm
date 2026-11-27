@@ -878,6 +878,7 @@ void pipeline(metal::MetalBackend &backend, const Options &options) {
       shared(uint64_t{routeCount + aneRows} * dims.hidden * sizeof(uint16_t), "pipeline expert output");
   metal::MetalBuffer status = shared(sizeof(uint32_t), "pipeline status");
   metal::MetalBuffer counts = shared(uint64_t{dims.experts} * sizeof(uint32_t), "pipeline expert counts");
+  metal::MetalBuffer taken = shared(sizeof(uint32_t), "pipeline taken routes");
   auto *selectedValues = static_cast<uint32_t *>(selected.contents());
   for (uint32_t route = 0; route < routeCount; ++route) selectedValues[route] = routes.routes[route].expert;
   std::memcpy(baseTable.contents(), expertBase.data(), expertBase.size() * sizeof(uint32_t));
@@ -922,7 +923,7 @@ void pipeline(metal::MetalBackend &backend, const Options &options) {
     for (const PipelineGroup &group : groups)
       command.add("ane_moe_clear", {cursors, group.work.tx.buffer, routeList},
                   AneMoeClearParams{0, group.rows, group.base}, {1, 1, 1});
-    command.add("ane_moe_mark", {selected, routeRows, baseTable, capacityTable, cursors, routeList, counts},
+    command.add("ane_moe_mark", {selected, routeRows, baseTable, capacityTable, cursors, routeList, counts, taken},
                 AneMoeMarkParams{routeCount, dims.experts, rowsOffset, 0}, {routeThreadgroups, 1, 1});
     for (const PipelineGroup &group : groups) {
       command.add("ane_moe_scale", {chunkRows, routeList, group.scaled, group.work.tx.buffer},

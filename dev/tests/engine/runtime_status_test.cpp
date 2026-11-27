@@ -967,7 +967,7 @@ void testAneFfnStatus() {
                         "\"evaluations\":0},"
                         "\"ane_moe\":{\"state\":\"off\",\"experts\":0,\"capacity\":0,\"blocks\":0,"
                         "\"region_rows\":0,\"reason\":\"\",\"bytes\":0,\"split_commands\":0,"
-                        "\"evaluations\":0},\"kv\":") != std::string::npos,
+                        "\"evaluations\":0,\"routes\":0,\"ane_routes\":0},\"kv\":") != std::string::npos,
           "a split the start left off is missing or inaccurate");
   require(status({AneFfnSnapshot::State::Split, "at share 0.41 for chunks of 640 rows or more", 0.41, 640, 3,
                   192, 1234.5},
@@ -976,7 +976,7 @@ void testAneFfnStatus() {
                         "\"reason\":\"at share 0.41 for chunks of 640 rows or more\",\"split_commands\":3,"
                         "\"reruns\":0,\"ane_ms\":1234.5,\"evaluations\":192},\"ane_moe\":{\"state\":\"off\","
                         "\"experts\":0,\"capacity\":0,\"blocks\":0,\"region_rows\":0,\"reason\":\"\","
-                        "\"bytes\":0,\"split_commands\":0,\"evaluations\":0}") != std::string::npos,
+                        "\"bytes\":0,\"split_commands\":0,\"evaluations\":0,\"routes\":0,\"ane_routes\":0}") != std::string::npos,
           "a split that serves is missing or inaccurate");
   require(status({AneFfnSnapshot::State::Stopped,
                   "losing to the GPU alone (19.4 ms on the Neural Engine per 2048-row layer against 19.0 ms "

@@ -384,6 +384,8 @@ AneMoe::AneMoe(metal::MetalBackend &backend, std::span<const BlockMoeWeights *co
   // next start plans its residents from.
   counts_ = buffer(uint64_t{blocks.size()} * shape_.experts * sizeof(uint32_t), "ane moe expert counts");
   std::memset(counts_.contents(), 0, counts_.sizeBytes());
+  taken_ = buffer(uint64_t{blocks.size()} * sizeof(uint32_t), "ane moe taken routes");
+  std::memset(taken_.contents(), 0, taken_.sizeBytes());
   if (loads.empty())
     loads_.assign(blocks.size(), std::vector<uint64_t>(shape_.experts, 0));
   else if (loads.size() == blocks.size() &&
@@ -508,6 +510,7 @@ bool AneMoe::begin(uint32_t rows) {
   }
   jobs_.clear();
   pending_.reset();
+  addedRoutes_ = 0;
   return splits(rows);
 }
 
@@ -533,7 +536,7 @@ void AneMoe::addRouting(metal::CommandGraph &graph, const MoeBuffers &buffers, c
             AneMoeClearParams{shape.experts, plan_.rows(), 0}, {1, 1, 1});
   graph.add("ane_moe_mark",
             {buffers.scratch.selectedExperts, buffers.scratch.routeRows, group.baseTable, group.capacityTable,
-             cursors_, routeList_, counts_},
+             cursors_, routeList_, counts_, taken_},
             AneMoeMarkParams{static_cast<uint32_t>(routes), shape.experts, static_cast<uint32_t>(routes), block},
             {(static_cast<uint32_t>(routes) + 255) / 256, 1, 1});
   graph.add("ane_moe_scale", {buffers.input, routeList_, scaled_, tx_.buffer},
@@ -541,6 +544,7 @@ void AneMoe::addRouting(metal::CommandGraph &graph, const MoeBuffers &buffers, c
   graph.add("ane_ffn_pack", {scaled_, x_.buffer}, AneFfnPackParams{shape.hiddenSize, 0, x_.strideBytes},
             {plan_.rows() / ANE_FFN_TILE, shape.hiddenSize / ANE_FFN_TILE, 1},
             {ANE_FFN_TILE, ANE_FFN_TILE_ROWS, 1});
+  addedRoutes_ += routes;
   const uint64_t ready = handoff_.next(), done = handoff_.next();
   graph.signal(handoff_.event(), ready);
   jobs_.push_back({block, ready, done});
@@ -572,6 +576,8 @@ metal::CommandTicket AneMoe::commit(const metal::CommandGraph &graph, metal::Com
   const std::vector<Job> jobs = std::exchange(jobs_, {});
   unfinished_ = !jobs.empty();
   committedApplications_ = static_cast<uint32_t>(jobs.size());
+  committedRoutes_ = addedRoutes_;
+  addedRoutes_ = 0;
   const auto cancel = [&](const std::string &reason) {
     if (!std::exchange(unfinished_, false)) return;
     handoff_.cancel(reason);
@@ -603,14 +609,19 @@ bool AneMoe::finish(const metal::CommandTiming &) {
     warnStopped();
     return false;
   }
-  // The routes this command's marks counted, added to the split's, and the
-  // buffer cleared for the next command's command to write.
+  // The routes this command's marks counted, added to the split's, the routes
+  // the engine took of them, and the buffers cleared for the next command.
   if (const auto *counts = static_cast<const uint32_t *>(counts_.contents())) {
     for (size_t block = 0; block < loads_.size(); ++block)
       for (uint32_t expert = 0; expert < loads_[block].size(); ++expert)
         loads_[block][expert] += counts[block * loads_[block].size() + expert];
     std::memset(counts_.contents(), 0, counts_.sizeBytes());
   }
+  if (const auto *taken = static_cast<const uint32_t *>(taken_.contents())) {
+    for (size_t block = 0; block < loads_.size(); ++block) served_.taken += taken[block];
+    std::memset(taken_.contents(), 0, taken_.sizeBytes());
+  }
+  served_.routes += committedRoutes_;
   ++served_.commands;
   served_.evaluations += committedApplications_;
   return true;

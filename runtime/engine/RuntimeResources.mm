@@ -1626,7 +1626,9 @@ AneMoeSnapshot RuntimeResources::aneMoeSnapshot() const {
           aneMoe_->regionRows(),
           aneMoe_->allocatedBytes(),
           served.commands,
-          served.evaluations};
+          served.evaluations,
+          served.routes,
+          served.taken};
 }
 
 ActualMemoryReport RuntimeResources::actualMemoryReport(

@@ -23,11 +23,13 @@ kernel void ane_moe_clear(device uint *cursors [[buffer(0)]], device half *scale
 
 // A route the ANE takes leaves the GPU: its expert claims a packed row, and a
 // route past the expert's capacity stays on the GPU. Runs before the grouping,
-// which skips what ANE_MOE_ROUTE_NONE marks.
+// which skips what ANE_MOE_ROUTE_NONE marks; `taken[block]` counts the routes
+// it took, which the host reads to say how much of the work the engine has.
 kernel void ane_moe_mark(device uint *selected [[buffer(0)]], device uint *route_rows [[buffer(1)]],
                          device const uint *expert_base [[buffer(2)]], device const uint *expert_capacity [[buffer(3)]],
                          device atomic_uint *cursors [[buffer(4)]], device uint *route_list [[buffer(5)]],
-                         device atomic_uint *counts [[buffer(6)]], constant AneMoeMarkParams &p [[buffer(7)]],
+                         device atomic_uint *counts [[buffer(6)]], device atomic_uint *taken [[buffer(7)]],
+                         constant AneMoeMarkParams &p [[buffer(8)]],
                          uint index [[thread_position_in_grid]]) {
   if (index >= p.routes) return;
   const uint expert = selected[index];
@@ -39,6 +41,7 @@ kernel void ane_moe_mark(device uint *selected [[buffer(0)]], device uint *route
   if (base == ANE_MOE_EXPERT_ABSENT) return;
   const uint slot = atomic_fetch_add_explicit(&cursors[expert], 1u, memory_order_relaxed);
   if (slot >= expert_capacity[expert]) return;  // the GPU takes this route
+  atomic_fetch_add_explicit(&taken[p.block], 1u, memory_order_relaxed);
   route_rows[index] = p.rows_offset + base + slot;
   route_list[base + slot] = index;
   selected[index] = ANE_MOE_ROUTE_NONE;
