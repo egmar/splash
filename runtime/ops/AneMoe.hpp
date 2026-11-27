@@ -33,9 +33,11 @@ namespace splash::ops {
 // queues one evaluation each, within the 127 the engine holds in flight.
 //
 // The weights are int8 copies the GPU requantizes once at construction from
-// the blocks' GGUF planes, without the dense split's Hadamard rotation: an
-// expert's weight rows spread less than a dense FFN's, and the rotation's
-// Metal kernel a row costs more than it earns here. A row's scale carries the
+// the blocks' GGUF planes, at a scale each row's group of 32 inputs (not the
+// dense split's Hadamard rotation, which an expert's rows earn less): a
+// group's outliers cost its group's precision, so the copies land within
+// about 0.4% RMS of the values the GPU multiplies where a scale a row leaves
+// 0.8%, and the graph multiplies each group's codes back before its matmul. A row's scale carries the
 // expert's scale and, for down, the headroom that keeps fp16's product in
 // range (AneMoe.cpp). Any failure of the ANE's work stops the split for the
 // life of the process; finish() then reports the command's results unusable

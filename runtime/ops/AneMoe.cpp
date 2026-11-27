@@ -237,11 +237,11 @@ std::string AneMoe::function(const MoeShape &shape, uint32_t experts, uint32_t c
   parameters = surfaces[0].bufferType(hidden, rows) + " x, " + surfaces[1].bufferType(1, rows) + " tx";
   for (uint32_t e = 0; e < experts; ++e) {
     parameters += ", " + surfaces[2 + 6 * e].bufferType(intermediate, hidden) + " " + named("wg", e);
-    parameters += ", " + surfaces[3 + 6 * e].bufferType(intermediate, 1) + " " + named("sg", e);
+    parameters += ", " + surfaces[3 + 6 * e].bufferType(intermediate, hidden / 32) + " " + named("sg", e);
     parameters += ", " + surfaces[4 + 6 * e].bufferType(intermediate, hidden) + " " + named("wu", e);
-    parameters += ", " + surfaces[5 + 6 * e].bufferType(intermediate, 1) + " " + named("su", e);
+    parameters += ", " + surfaces[5 + 6 * e].bufferType(intermediate, hidden / 32) + " " + named("su", e);
     parameters += ", " + surfaces[6 + 6 * e].bufferType(hidden, intermediate) + " " + named("wd", e);
-    parameters += ", " + surfaces[7 + 6 * e].bufferType(hidden, 1) + " " + named("sd", e);
+    parameters += ", " + surfaces[7 + 6 * e].bufferType(hidden, intermediate / 32) + " " + named("sd", e);
   }
   line(tensor("int8", hidden, rows) + " x_t = tensor_buffer_to_tensor<ios17>(input = x)");
   line(tensor("fp16", 1, rows) + " tx_t = tensor_buffer_to_tensor<ios17>(input = tx)");
@@ -257,9 +257,28 @@ std::string AneMoe::function(const MoeShape &shape, uint32_t experts, uint32_t c
     f16(g + "_d", intermediate, hidden, "dequantize(input = " + g + "_t, scale = " + unit + ")");
     f16(u + "_d", intermediate, hidden, "dequantize(input = " + u + "_t, scale = " + unit + ")");
     f16(d + "_d", hidden, intermediate, "dequantize(input = " + d + "_t, scale = " + unit + ")");
-    line(tensor("fp16", intermediate, 1) + " " + sg + "_t = tensor_buffer_to_tensor<ios17>(input = " + sg + ")");
-    line(tensor("fp16", intermediate, 1) + " " + su + "_t = tensor_buffer_to_tensor<ios17>(input = " + su + ")");
-    line(tensor("fp16", hidden, 1) + " " + sd + "_t = tensor_buffer_to_tensor<ios17>(input = " + sd + ")");
+    line(tensor("fp16", intermediate, hidden / 32) + " " + sg + "_t = tensor_buffer_to_tensor<ios17>(input = " + sg + ")");
+    line(tensor("fp16", intermediate, hidden / 32) + " " + su + "_t = tensor_buffer_to_tensor<ios17>(input = " + su + ")");
+    line(tensor("fp16", hidden, intermediate / 32) + " " + sd + "_t = tensor_buffer_to_tensor<ios17>(input = " + sd + ")");
+    // Each group of 32 inputs' codes come back at its own scale before the
+    // matmul: a group's outliers cost their group's precision, not its row's
+    // (AneMoe.cpp's graph; a scale a row's would be one multiply after the
+    // matmul, and a quarter more quantisation error).
+    const auto grouped = [&](const std::string &codes, const std::string &scale, const std::string &scaled,
+                             uint32_t height, uint32_t width) {
+      const std::string h = std::to_string(height), w = std::to_string(width), g = std::to_string(width / 32);
+      line("tensor<fp16, [1, 1, " + h + ", " + g + ", 1]> " + scale + "_5 = reshape(x = " + scale +
+           "_t, shape = tensor<int32, [5]>([1, 1, " + h + ", " + g + ", 1]))");
+      line("tensor<fp16, [1, 1, " + h + ", " + g + ", 32]> " + codes + "_5 = reshape(x = " + codes +
+           "_d, shape = tensor<int32, [5]>([1, 1, " + h + ", " + g + ", 32]))");
+      line("tensor<fp16, [1, 1, " + h + ", " + g + ", 32]> " + scaled + "_5 = mul(x = " + codes + "_5, y = " +
+           scale + "_5)");
+      f16(scaled, height, width,
+          "reshape(x = " + scaled + "_5, shape = tensor<int32, [4]>(" + dimensions(height, width) + "))");
+    };
+    grouped(g, sg, g + "_w", intermediate, hidden);
+    grouped(u, su, u + "_w", intermediate, hidden);
+    grouped(d, sd, d + "_w", hidden, intermediate);
     const std::string x = "x" + s;
     if (experts > 1)
       line(tensor("fp16", hidden, capacity) + " " + x +
@@ -267,36 +286,33 @@ std::string AneMoe::function(const MoeShape &shape, uint32_t experts, uint32_t c
            "]), size = tensor<int32, [4]>(" + dimensions(hidden, capacity) + "))");
     const std::string in = experts > 1 ? x : "x_d";
     f16(g + "m", intermediate, capacity,
-        "matmul(transpose_x = bool(false), transpose_y = bool(false), x = " + g + "_d, y = " + in + ")");
-    f16(g + "s", intermediate, capacity, "mul(x = " + g + "m, y = " + sg + "_t)");
+        "matmul(transpose_x = bool(false), transpose_y = bool(false), x = " + g + "_w, y = " + in + ")");
     f16(u + "m", intermediate, capacity,
-        "matmul(transpose_x = bool(false), transpose_y = bool(false), x = " + u + "_d, y = " + in + ")");
-    f16(u + "s", intermediate, capacity, "mul(x = " + u + "m, y = " + su + "_t)");
+        "matmul(transpose_x = bool(false), transpose_y = bool(false), x = " + u + "_w, y = " + in + ")");
     // tanh(g / cap) * cap * sigmoid(g): the gate's softcap, or g where the
     // routing has none; sigmoid(g) as (1 + tanh(g / 2)) / 2 through the ANE's
     // tanh, as AneFfn's SiLU.
     if (shape.gateSoftcap) {
-      f16(g + "c", intermediate, capacity, "mul(x = " + g + "s, y = " + fp16(1.0 / shape.gateSoftcap) + ")");
+      f16(g + "c", intermediate, capacity, "mul(x = " + g + "m, y = " + fp16(1.0 / shape.gateSoftcap) + ")");
       f16(g + "ct", intermediate, capacity, "tanh(x = " + g + "c)");
       f16(g + "cap", intermediate, capacity, "mul(x = " + g + "ct, y = " + fp16(shape.gateSoftcap) + ")");
     }
-    f16(g + "h", intermediate, capacity, "mul(x = " + g + "s, y = " + fp16(0.5) + ")");
+    f16(g + "h", intermediate, capacity, "mul(x = " + g + "m, y = " + fp16(0.5) + ")");
     f16(g + "t", intermediate, capacity, "tanh(x = " + g + "h)");
     f16(g + "p", intermediate, capacity, "add(x = " + g + "t, y = " + fp16(1.0) + ")");
     f16(g + "g", intermediate, capacity, "mul(x = " + g + "p, y = " + fp16(0.5) + ")");
     f16(g + "f", intermediate, capacity,
-        "mul(x = " + (shape.gateSoftcap ? g + "cap" : g + "s") + ", y = " + g + "g)");
+        "mul(x = " + (shape.gateSoftcap ? g + "cap" : g + "m") + ", y = " + g + "g)");
     if (shape.upSoftcap) {
-      f16(u + "c", intermediate, capacity, "mul(x = " + u + "s, y = " + fp16(1.0 / shape.upSoftcap) + ")");
+      f16(u + "c", intermediate, capacity, "mul(x = " + u + "m, y = " + fp16(1.0 / shape.upSoftcap) + ")");
       f16(u + "ct", intermediate, capacity, "tanh(x = " + u + "c)");
       f16(u + "cap", intermediate, capacity, "mul(x = " + u + "ct, y = " + fp16(shape.upSoftcap) + ")");
     }
     f16("h" + s, intermediate, capacity,
-        "mul(x = " + g + "f, y = " + (shape.upSoftcap ? u + "cap" : u + "s") + ")");
+        "mul(x = " + g + "f, y = " + (shape.upSoftcap ? u + "cap" : u + "m") + ")");
     f16("hh" + s, intermediate, capacity, "mul(x = h" + s + ", y = " + fp16(1.0 / kHeadroom) + ")");
-    f16("y" + s + "m", hidden, capacity,
-        "matmul(transpose_x = bool(false), transpose_y = bool(false), x = " + d + "_d, y = hh" + s + ")");
-    f16("y" + s, hidden, capacity, "mul(x = y" + s + "m, y = " + sd + "_t)");
+    f16("y" + s, hidden, capacity,
+        "matmul(transpose_x = bool(false), transpose_y = bool(false), x = " + d + "_w, y = hh" + s + ")");
     outputs += std::string(outputs.empty() ? "" : ", ") + "y" + s;
   }
   if (experts > 1)
@@ -387,12 +403,15 @@ AneMoe::AneMoe(metal::MetalBackend &backend, std::span<const BlockMoeWeights *co
     if (group.experts.empty()) continue;
     std::vector<uint32_t> base(shape_.experts, ANE_MOE_EXPERT_ABSENT), capacity(shape_.experts, 0);
     for (size_t slot = 0; slot < group.experts.size(); ++slot) {
+      // A scale a group of 32 inputs a row (AneMoe.cpp's graph multiplies
+      // each group's codes before the matmul), which costs a quarter of the
+      // per-row scales' quantisation error on an expert's rows.
       group.gate.push_back(surface(intermediate, hidden, Element::Int8));
-      group.gateScale.push_back(surface(intermediate, 1, Element::Float16));
+      group.gateScale.push_back(surface(intermediate, hidden / 32, Element::Float16));
       group.up.push_back(surface(intermediate, hidden, Element::Int8));
-      group.upScale.push_back(surface(intermediate, 1, Element::Float16));
+      group.upScale.push_back(surface(intermediate, hidden / 32, Element::Float16));
       group.down.push_back(surface(hidden, intermediate, Element::Int8));
-      group.downScale.push_back(surface(hidden, 1, Element::Float16));
+      group.downScale.push_back(surface(hidden, intermediate / 32, Element::Float16));
       base[group.experts[slot]] = static_cast<uint32_t>(slot) * plan_.capacity;
       capacity[group.experts[slot]] = plan_.capacity;
     }
@@ -449,7 +468,7 @@ AneMoe::AneMoe(metal::MetalBackend &backend, std::span<const BlockMoeWeights *co
       const auto add = [&](const BlockExpertProjection &projection, const ane::Surface &output,
                            const ane::Surface &scale, uint32_t row, uint32_t width, uint32_t groups,
                            uint32_t height, float multiplier) {
-        graph.add("ane_moe_weights_gguf",
+        graph.add("ane_moe_weights_grouped_gguf",
                   {projection.routed.plane0, projection.routed.plane1Slot(), projection.routed.meta, output.buffer,
                    scale.buffer},
                   AneMoeWeightParams{groups, row, 0, width, output.strideBytes,

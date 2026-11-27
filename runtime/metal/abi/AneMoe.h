@@ -60,13 +60,15 @@ struct AneMoeClearParams {
   uint32_t base;
 };
 
-// A resident expert's projection as ane_moe_weights_gguf stores it: rows
-// [row, row + rows) of a GGUF image tensor's `groups` groups of 32 inputs,
-// `width` inputs a row, as `rows` int8 rows `stride` bytes apart with their
-// fp16 scales `scale_stride` halves apart. A row's codes are its values over
-// the row's peak / 127, which the row's scale, the peak / 127 * 128, carries
-// back; `multiplier` (the expert's scale, and the headroom of down, AneMoe.cpp)
-// scales that back, not the codes.
+// A resident expert's projection as ane_moe_weights_gguf and
+// ane_moe_weights_grouped_gguf store it: rows [row, row + rows) of a GGUF
+// image tensor's `groups` groups of 32 inputs, `width` inputs a row, as `rows`
+// int8 rows `stride` bytes apart with their fp16 scales `scale_stride` halves
+// apart — a row's, or a group of 32 inputs' under the row. The ungrouped a
+// row's codes are its values over the row's peak / 127, which the row's
+// scale, the peak / 127 * 128, carries back; the grouped each group's over
+// its peak, at the group's scale. `multiplier` (the expert's scale, and the
+// headroom of down, AneMoe.cpp) scales the product back, not the codes.
 struct AneMoeWeightParams {
   uint32_t groups;
   uint32_t row;

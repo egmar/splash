@@ -129,6 +129,50 @@ inline void ane_moe_weight_rows(device uchar *a, device uchar *b, device uchar *
   if (lane == 0) scale[row * params.scale_stride] = half(float(half(quant * ANE_FFN_INT8_UNIT)) * params.multiplier);
 }
 
+// The same with a scale a group of 32 inputs, as a dense split's rotation
+// earns for an expert: each lane a group of the row, its own peak, its scale
+// and its codes, so a group's outliers cost only their group's precision.
+template <class F>
+inline void ane_moe_weight_group_rows(device uchar *a, device uchar *b, device uchar *c, device char *output,
+                                      device half *scale, constant AneMoeWeightParams &params, uint tile,
+                                      uint simd_group, uint lane) {
+  const uint row = tile * ANE_FFN_WEIGHT_ROWS + simd_group;
+  if (row >= params.rows) return;
+  const uint source = params.row + row, groups = params.width / 32;
+  for (uint group = lane; group < groups; group += 32) {
+    const uint begin = params.input + group * 32;
+    float value[32], peak = 0.0f;
+    for (uint at = 0; at < 32; at += 4) {
+      float four[4];
+      gguf_row_values<F>(four, a, b, c, params.groups, source, begin + at);
+      for (uint e = 0; e < 4; ++e) {
+        value[at + e] = four[e];
+        peak = max(peak, fabs(four[e]));
+      }
+    }
+    const float quant = max(peak, ANE_FFN_PEAK_FLOOR) / ANE_FFN_INT8_PEAK, inverse = 1.0f / quant;
+    for (uint at = 0; at < 32; at += 4)
+      *(device char4 *)(output + ulong(row) * params.stride + group * 32 + at) =
+          char4(clamp(rint(float4(value[at], value[at + 1], value[at + 2], value[at + 3]) * inverse),
+                      -ANE_FFN_INT8_PEAK, ANE_FFN_INT8_PEAK));
+    scale[ulong(row) * params.scale_stride + group] =
+        half(float(half(quant * ANE_FFN_INT8_UNIT)) * params.multiplier);
+  }
+}
+
+// A projection of a resident expert (ops::AneMoe), a scale a row.
+kernel void ane_moe_weights_grouped_gguf(device uchar *a [[buffer(0)]], device uchar *b [[buffer(1)]],
+                                        device uchar *c [[buffer(2)]], device char *output [[buffer(3)]],
+                                        device half *scale [[buffer(4)]],
+                                        constant AneMoeWeightParams &params [[buffer(5)]],
+                                        uint tile [[threadgroup_position_in_grid]],
+                                        uint simd_group [[simdgroup_index_in_threadgroup]],
+                                        uint lane [[thread_index_in_simdgroup]]) {
+  quant_format_switch(params.format, [&](auto format) {
+    ane_moe_weight_group_rows<decltype(format)>(a, b, c, output, scale, params, tile, simd_group, lane);
+  });
+}
+
 // A projection of a resident expert (ops::AneMoe), the body of the dispatch's
 // format.
 kernel void ane_moe_weights_gguf(device uchar *a [[buffer(0)]], device uchar *b [[buffer(1)]],
