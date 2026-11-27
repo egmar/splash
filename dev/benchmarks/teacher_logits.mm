@@ -362,7 +362,7 @@ int main(int argc, char **argv) {
         const std::vector<ops::MoeShape> shapes(blocks.blocks.size(), blocks.shape);
         aneMoe = std::make_unique<ops::AneMoe>(
             backend, blocks.blocks, blocks.shape,
-            ops::AneMoe::plan(shapes, {}, {.experts = *aneMoeExperts, .capacity = *aneMoeCapacity}),
+            ops::AneMoe::plan(shapes, {}, {.experts = *aneMoeExperts, .capacity = *aneMoeCapacity}), {},
             std::function<bool ()>{});
       }
       // Every cycle verifies, and so retains, every row of its block.

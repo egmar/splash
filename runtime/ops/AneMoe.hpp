@@ -123,7 +123,7 @@ public:
   // `interrupted` returns true. Throws std::invalid_argument for a plan the
   // blocks or shapes cannot hold, or an unsupported shape.
   AneMoe(metal::MetalBackend &backend, std::span<const BlockMoeWeights *const> blocks, const MoeShape &shape,
-         Plan plan, std::function<bool()> interrupted);
+         Plan plan, Loads loads, std::function<bool()> interrupted);
   AneMoe(const AneMoe &) = delete;
   AneMoe &operator=(const AneMoe &) = delete;
 
@@ -135,9 +135,10 @@ public:
     uint64_t commands = 0, evaluations = 0;
   };
   [[nodiscard]] const Served &served() const noexcept { return served_; }
-  // The routes each block's experts took since the split was built, as its
-  // mark counted them (both the engine's and the GPU's): what the next start
-  // plans the residents from, or a corpus's counts do.
+  // The routes each block's experts took, as its mark counted them (both the
+  // engine's and the GPU's), added to the counts the split was built with,
+  // which a start hands it from the runs before (the constructor's `loads`):
+  // what the next start plans the residents from, or a corpus's counts do.
   [[nodiscard]] const Loads &loads() const noexcept { return loads_; }
   // The rows a block's group joins after the routes of each step's expert
   // outputs (MoeConfig::aneRows, MoeWorkspace::expertOutputBytes): every

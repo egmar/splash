@@ -1069,6 +1069,9 @@ RuntimeResources::create(const RuntimeResourcesConfig &config,
       config.aneMoeExperts && config.aneMoeCapacity ? model::moeBlocks(loaded) : model::MoeBlocks{};
   std::optional<ops::AneMoe::Plan> moePlan;
   uint64_t aneMoeBytes = 0;
+  // The counts the runs before left, which plan this start's residents and
+  // carry on into this run's.
+  ops::AneMoe::Loads moeLoads;
   std::string aneMoeKey, aneMoeOutcome;
   if (!moeSplit.blocks.empty()) {
     const std::vector<ops::MoeShape> shapes(moeSplit.blocks.size(), moeSplit.shape);
@@ -1086,7 +1089,6 @@ RuntimeResources::create(const RuntimeResourcesConfig &config,
                 backend->capabilities().deviceName + " macos " +
                 std::string([[NSProcessInfo processInfo] operatingSystemVersionString].UTF8String) + " build " +
                 config.buildId;
-    ops::AneMoe::Loads moeLoads;
     if (const std::optional<std::string> line = ane::recall(aneMoeKey))
       moeLoads = ops::AneMoe::parseLoads(*line, static_cast<uint32_t>(moeSplit.blocks.size()),
                                          moeSplit.shape.experts)
@@ -1402,7 +1404,8 @@ RuntimeResources::create(const RuntimeResourcesConfig &config,
     std::unique_ptr<ops::AneMoe> aneMoe;
     if (moePlan) {
       try {
-        aneMoe = std::make_unique<ops::AneMoe>(*backend, moeSplit.blocks, moeSplit.shape, *moePlan,
+        // The counts the runs before left carry on into this one's.
+        aneMoe = std::make_unique<ops::AneMoe>(*backend, moeSplit.blocks, moeSplit.shape, *moePlan, moeLoads,
                                                config.cancelled);
         logLine("Neural Engine MoE split: ", moePlan->experts, " experts of ", moePlan->capacity,
                 " packed rows a block, ", moeSplit.blocks.size(), " blocks, ",

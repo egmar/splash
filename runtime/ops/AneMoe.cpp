@@ -310,7 +310,7 @@ std::string AneMoe::function(const MoeShape &shape, uint32_t experts, uint32_t c
 }
 
 AneMoe::AneMoe(metal::MetalBackend &backend, std::span<const BlockMoeWeights *const> blocks, const MoeShape &shape,
-               Plan plan, std::function<bool()> interrupted)
+               Plan plan, Loads loads, std::function<bool()> interrupted)
     : backend_(backend), blocks_(blocks.begin(), blocks.end()), shape_(shape), plan_(std::move(plan)),
       handoff_(backend, kHandoffBound) {
   if (const char *reason = unsupported(shape)) throw std::invalid_argument(reason);
@@ -366,7 +366,13 @@ AneMoe::AneMoe(metal::MetalBackend &backend, std::span<const BlockMoeWeights *co
   // next start plans its residents from.
   counts_ = buffer(uint64_t{blocks.size()} * shape_.experts * sizeof(uint32_t), "ane moe expert counts");
   std::memset(counts_.contents(), 0, counts_.sizeBytes());
-  loads_.assign(blocks.size(), std::vector<uint64_t>(shape_.experts, 0));
+  if (loads.empty())
+    loads_.assign(blocks.size(), std::vector<uint64_t>(shape_.experts, 0));
+  else if (loads.size() == blocks.size() &&
+           std::ranges::all_of(loads, [&](const std::vector<uint64_t> &block) { return block.size() == shape_.experts; }))
+    loads_ = std::move(loads);
+  else
+    throw std::invalid_argument("ANE MoE split's loads are of other blocks or experts");
   x_ = surface(hidden, rows, Element::Int8);
   tx_ = surface(1, rows, Element::Float16);
   y_ = surface(hidden, rows, Element::Float16);
