@@ -405,7 +405,10 @@ int main(int argc, char **argv) {
       uint64_t rows = 0;
       for (const Case &c : cases) {
         size.include(c.plan.scratchSize());
-        rows = std::max<uint64_t>(rows, c.plan.storageRows());
+        // The passes64 case reads the tail from row kMaximumDecodeTileRows on,
+        // so its storage spans that offset plus its own rows.
+        const uint64_t span = c.rest ? kMaximumDecodeTileRows + c.rest->storageRows() : c.plan.storageRows();
+        rows = std::max<uint64_t>(rows, span);
         if (c.rest) size.include(c.rest->scratchSize());
       }
       const auto zeros = [&](uint64_t n) {
