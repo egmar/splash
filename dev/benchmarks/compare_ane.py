@@ -22,6 +22,7 @@ import json
 import statistics
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 
@@ -35,6 +36,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--capacity", type=int, default=1024, help="packed rows each holds (default 1024)")
     parser.add_argument("--samples", type=int, default=1)
     parser.add_argument("--benchmark", type=Path, default=Path("build/engine-tests/backend-benchmark"))
+    parser.add_argument("--json-dir", type=Path, help="where each pass's JSON is kept (default: a temporary directory)")
+    parser.add_argument("--json", action="store_true", help="also print the compared passes' JSON on stdout")
     return parser.parse_args(argv)
 
 
@@ -57,8 +60,18 @@ def run(benchmark: Path, metallib: Path, model_root: Path, args: list[str], labe
     return json.loads(document)
 
 
-def rows(document: dict) -> dict[tuple[str, int], float]:
-    return {(m["scenario"], m["prompt_tokens"]): m["prefill_gpu_ms"] for m in document["measurements"]}
+# The context scenario's forms, which its rows are named by.
+CONTEXT_FORMS = {"cold", "exact", "rolling", "rolling_cold", "answer", "continuation", "continuation_cold",
+                 "lazy_seed", "lazy_chain_end", "lazy_repeat", "lazy_materialize", "lazy_reuse"}
+
+
+def label(scenario: str, tokens: int) -> str:
+    """A row's test: what it is, and the prompt it prefilled."""
+    if scenario in CONTEXT_FORMS:
+        return f"context {scenario.replace('_', ' ')} {tokens}"
+    if scenario.startswith("partial_4k_"):
+        return f"partial {scenario[len('partial_4k_'):]} {tokens}"
+    return f"{scenario} {tokens}"
 
 
 def main(argv: list[str]) -> int:
@@ -81,46 +94,79 @@ def main(argv: list[str]) -> int:
         if document["ane_ffn_bytes"] == 0:
             raise SystemExit(f"{label} took no split: see its log for why")
 
-    reference = rows(alone_first)
-    drift = rows(alone_last)
-    candidate = rows(with_split)
-    measured = [reference[key] for key in reference if key in drift]
-    drift_note = ""
-    if measured:
-        drift_note = f"; the GPU-alone runs, {min(measured):.0f}..{max(measured):.0f} ms"
+    def measured(document: dict) -> dict[tuple[str, int], dict[str, float]]:
+        return {(m["scenario"], m["prompt_tokens"]): m for m in document["measurements"]}
+
+    alone = measured(alone_first)
+    alone_last_rows = measured(alone_last)
+    split_rows = measured(with_split)
+    if args.json_dir:
+        args.json_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        args.json_dir = Path(tempfile.mkdtemp(prefix="ane-compare-"))
+    kept = {}
+    for name, document in (("alone-1", alone_first), ("split-calibrating", calibrating),
+                           ("split", with_split), ("alone-2", alone_last)):
+        path = args.json_dir / f"{name}.json"
+        path.write_text(json.dumps(document, indent=2) + "\n")
+        kept[name] = path
+    if args.json:
+        print(json.dumps(with_split))
 
     identity = with_split.get("identity", {})
     try:
         model_name = json.loads((args.model_root / "model.json").read_text()).get("model", args.model_root.name)
     except (OSError, ValueError):
         model_name = args.model_root.name
+    print(f"\n{identity.get('device', 'this Mac')}, {model_name} — {args.scenario}")
     print(
-        f"\n{identity.get('device', 'this Mac')}, {model_name}"
-        f" — scenario {args.scenario} ({args.samples} sample(s) a run)"
+        f"split {args.experts} experts x {args.capacity} rows: {with_split['ane_ffn_bytes'] // (1 << 20)} MiB planned;"
+        f" context {alone_first['max_context_tokens']} alone, {with_split['max_context_tokens']} with the split"
+    )
+
+    def median(row_key: tuple[str, int], key: str) -> float:
+        values = [row[key] for row in (alone.get(row_key), alone_last_rows.get(row_key)) if row]
+        return statistics.median(values) if values else 0.0
+
+    def change(before: float, after: float) -> str:
+        if not before:
+            return "-"
+        return f"{(after - before) / before * 100.0:+.0f}%"
+
+    print(
+        f"\n  {'test':28s} {'prefill ms':>26s} {'tokens/s':>26s} {'ttft ms':>26s}"
     )
     print(
-        f"split {args.experts} experts x {args.capacity} rows: "
-        f"{with_split['ane_ffn_bytes'] // (1 << 20)} MiB planned, "
-        f"context {alone_first['max_context_tokens']} -> {with_split['max_context_tokens']} tokens{drift_note}"
+        f"  {'':28s} {'alone':>8s} {'split':>8s} {'delta':>8s}"
+        f" {'alone':>8s} {'split':>8s} {'delta':>8s}"
+        f" {'alone':>8s} {'split':>8s} {'delta':>8s}"
     )
-    print(
-        f"\n  {'scenario':20s} {'tokens':>7s} {'alone ms':>9s} {'split ms':>9s} {'speedup':>8s} "
-        f"{'ttft alone':>11s} {'ttft split':>11s}"
-    )
-    for document in (alone_first,):
-        ttft = {(m["scenario"], m["prompt_tokens"]): m["ttft_ms"] for m in document["measurements"]}
-    ttft_split = {(m["scenario"], m["prompt_tokens"]): m["ttft_ms"] for m in with_split["measurements"]}
-    for key in sorted(reference):
-        if key not in candidate:
+    for row_key in sorted(alone):
+        candidate_row = split_rows.get(row_key)
+        if not candidate_row:
             continue
-        speedup = reference[key] / candidate[key] if candidate[key] else 0.0
+        alone_ms, split_ms = median(row_key, "prefill_gpu_ms"), candidate_row["prefill_gpu_ms"]
+        alone_rate = 1000.0 * row_key[1] / alone_ms if alone_ms else 0.0
+        split_rate = 1000.0 * row_key[1] / split_ms if split_ms else 0.0
+        alone_ttft, split_ttft = median(row_key, "ttft_ms"), candidate_row["ttft_ms"]
+        change_ms = change(alone_ms, split_ms)
+        change_rate = change(alone_rate, split_rate)
+        change_ttft = change(alone_ttft, split_ttft)
         print(
-            f"  {key[0]:20s} {key[1]:7d} {reference[key]:9.0f} {candidate[key]:9.0f} {speedup:7.3f}x "
-            f"{ttft.get(key, 0.0):11.0f} {ttft_split.get(key, 0.0):11.0f}"
+            f"  {label(row_key[0], row_key[1]):28s} {alone_ms:8.0f} {split_ms:8.0f} {change_ms:>8s}"
+            f" {alone_rate:8.0f} {split_rate:8.0f} {change_rate:>8s}"
+            f" {alone_ttft:8.0f} {split_ttft:8.0f} {change_ttft:>8s}"
         )
     alone_decode = [round(v) for v in alone_first["warmup"]["decode_gpu_ms"]]
     split_decode = [round(v) for v in with_split["warmup"]["decode_gpu_ms"]]
-    print(f"\n  decode warmup (GPU ms, 1..{len(alone_decode)} lanes): {alone_decode} alone, {split_decode} with the split")
+    change_decode = [
+        f"{change(before, after) if before else '-'}" for before, after in zip(alone_decode, split_decode)
+    ]
+    print(
+        f"\n  decode warmup (GPU ms, 1..{len(alone_decode)} lanes): {alone_decode} alone, {split_decode} with the"
+        f" split ({', '.join(change_decode)})"
+    )
+    print("\n  JSON of each pass: " + ", ".join(str(path) for path in kept.values()))
     return 0
 
 

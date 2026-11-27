@@ -1816,8 +1816,11 @@ int main(int argc, char **argv) {
     // The run as a table on stderr, so it can be read without the JSON that
     // stdout carries: prefill GPU milliseconds and tokens a second, the first
     // token, and what the plan holds (the split's bytes, the context).
-    std::fprintf(stderr, "\nprefill (GPU ms, tokens/s): split %llu MiB, context %u tokens\n",
-                 static_cast<unsigned long long>(plan.aneFfnBytes / (1 << 20)), engineConfig.maxContext);
+    if (plan.aneFfnBytes)
+      std::fprintf(stderr, "\nprefill (GPU ms, tokens/s): split %llu MiB, context %u tokens\n",
+                   static_cast<unsigned long long>(plan.aneFfnBytes / (1 << 20)), engineConfig.maxContext);
+    else
+      std::fprintf(stderr, "\nprefill (GPU ms, tokens/s): no split, context %u tokens\n", engineConfig.maxContext);
     std::fprintf(stderr, "  %-20s %7s %9s %8s %9s %-10s\n", "scenario", "tokens", "prefill", "tok/s", "ttft",
                  "cache");
     for (const Measurement &measurement : measurements) {
