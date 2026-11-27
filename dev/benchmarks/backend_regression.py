@@ -140,6 +140,7 @@ def run_round(tree: Path, model_root: Path, round_index: int, version: str, args
         str(model_root),
         "--samples",
         str(args.samples),
+        "--json",
         "--scenario",
         ",".join(SCENARIOS),
         "--progress",

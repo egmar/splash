@@ -6,6 +6,8 @@ does, so one command gives the comparison:
 
 The scenarios run once without the split and twice with it, alternating the
 GPU-alone runs either side so the Mac's drift shows up in the reference too;
+--verbose streams each pass's log and measurements, --json prints the compared
+pass's JSON, and every pass's JSON is kept in a directory the run names;
 the last split run is the one compared, because the first run after a build is
 uncalibrated (the split learns which experts the routes reach and plans the
 next start from them). `--experts x --capacity` at most 8,192 packed rows, the
@@ -38,16 +40,19 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--benchmark", type=Path, default=Path("build/engine-tests/backend-benchmark"))
     parser.add_argument("--json-dir", type=Path, help="where each pass's JSON is kept (default: a temporary directory)")
     parser.add_argument("--json", action="store_true", help="also print the compared passes' JSON on stdout")
+    parser.add_argument("--verbose", action="store_true", help="stream each pass's log and measurements")
     return parser.parse_args(argv)
 
 
-def run(benchmark: Path, metallib: Path, model_root: Path, args: list[str], label: str) -> dict:
+def run(benchmark: Path, metallib: Path, model_root: Path, args: list[str], label: str,
+        verbose: bool = False) -> dict:
     """One benchmark run's JSON, its measurements and log passing through as
     they come."""
     print(f"\n[{label}]", file=sys.stderr)
     result = subprocess.run(
         [str(benchmark), str(metallib), str(model_root), *args],
         stdout=subprocess.PIPE,
+        stderr=None if verbose else subprocess.PIPE,
         text=True,
     )
     document = None
@@ -56,6 +61,8 @@ def run(benchmark: Path, metallib: Path, model_root: Path, args: list[str], labe
             document = line
     if result.returncode != 0 or document is None:
         sys.stderr.write(result.stdout[-2000:])
+        if result.stderr:
+            sys.stderr.write(result.stderr[-2000:])
         raise SystemExit(f"the benchmark failed (exit {result.returncode})")
     return json.loads(document)
 
@@ -80,16 +87,16 @@ def main(argv: list[str]) -> int:
         raise SystemExit("--experts x --capacity is at most 8,192 packed rows")
     if not args.benchmark.exists():
         raise SystemExit(f"{args.benchmark} is not built: make build/engine-tests/backend-benchmark")
-    common = ["--scenario", args.scenario, "--samples", str(args.samples)]
+    common = ["--json", "--scenario", args.scenario, "--samples", str(args.samples)]
     if args.context_lengths:
         common += ["--context-lengths", args.context_lengths]
     split = common + ["--ane-moe-experts", str(args.experts), "--ane-moe-capacity", str(args.capacity)]
 
     print("alone, with the split twice, then alone again; the second split run is compared", file=sys.stderr)
-    alone_first = run(args.benchmark, args.metallib, args.model_root, common, "1/4 alone")
-    calibrating = run(args.benchmark, args.metallib, args.model_root, split, "2/4 split (calibrating)")
-    with_split = run(args.benchmark, args.metallib, args.model_root, split, "3/4 split (compared)")
-    alone_last = run(args.benchmark, args.metallib, args.model_root, common, "4/4 alone")
+    alone_first = run(args.benchmark, args.metallib, args.model_root, common, "1/4 alone", args.verbose)
+    calibrating = run(args.benchmark, args.metallib, args.model_root, split, "2/4 split (calibrating)", args.verbose)
+    with_split = run(args.benchmark, args.metallib, args.model_root, split, "3/4 split (compared)", args.verbose)
+    alone_last = run(args.benchmark, args.metallib, args.model_root, common, "4/4 alone", args.verbose)
     for document, label in ((calibrating, "the first split run"), (with_split, "the split")):
         if document["ane_ffn_bytes"] == 0:
             raise SystemExit(f"{label} took no split: see its log for why")

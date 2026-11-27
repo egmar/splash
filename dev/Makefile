@@ -202,7 +202,7 @@ ifneq ($(BASELINE),)
 		$(ANE_FFN_SHARE_ARGS) $(WEIGHT_DIGESTS_ARGS)
 else
 	@$(TEST_BACKEND_BENCHMARK) $(LIB) "$(MODEL_ROOT)" \
-		--scenario decode,partial,short --samples 3 $(ANE_FFN_SHARE_ARGS) \
+		--scenario decode,partial,short --samples 3 $(ANE_FFN_SHARE_ARGS) --json \
 		--progress "$(MODEL_RESULTS)/backend-benchmark-progress.jsonl" \
 		> "$(MODEL_RESULTS)/backend-benchmark.json" \
 		&& $(PYTHON) -m json.tool "$(MODEL_RESULTS)/backend-benchmark.json" >/dev/null

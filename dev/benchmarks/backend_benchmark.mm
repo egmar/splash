@@ -976,7 +976,7 @@ int main(int argc, char **argv) {
                    "[--ane-moe-experts COUNT --ane-moe-capacity ROWS] [--max-context TOKENS] "
                    "[--activations auto|bf16] [--verify-rows all|auto] "
                    "[--logits DIR [--logits-from DIR] [--logits-width LANES] [--logits-cache evict|keep]] "
-                   "[--context-lengths TOKENS[,TOKENS...]] [--short-idle SECONDS]\n"
+                   "[--context-lengths TOKENS[,TOKENS...]] [--short-idle SECONDS] [--json] [--verbose]\n"
                    "  NAME: decode, partial, short, transcripts, context, exact, logits or resume "
                    "(default: decode,partial,context)\n"
                    "  SHARE: the prefill FFN's Neural Engine share in [0, 1) "
@@ -996,6 +996,8 @@ int main(int argc, char **argv) {
                    "prefixes it scores (default: its own greedy transcripts')\n"
                    "  LANES: the score requests the logits scenario runs at once "
                    "(default: 1)\n"
+                   "  --json: write the run's JSON on stdout (the table goes to stderr either way)\n"
+                   "  --verbose: print each measurement as it is taken\n"
                    "  --logits-cache: keep leaves the cache between score requests, so that "
                    "a prefix that extends an earlier one resumes from its KV as a "
                    "conversation's next turn does (default: evict, each cold)\n"
@@ -1021,56 +1023,70 @@ int main(int argc, char **argv) {
     uint32_t logitsWidth = 1;
     bool logitsKeepCache = false;
     bool logitsOptions = false;
-    for (int index = 3; index < argc; index += 2) {
-      if (index + 1 >= argc)
+    // The options that take no value are taken out first, so the rest pair up
+    // as before. --json writes the run's JSON on stdout (nothing else does),
+    // and --verbose prints each measurement as it is taken.
+    std::vector<std::string_view> options;
+    bool jsonOutput = false, verbose = false;
+    for (int index = 3; index < argc; ++index) {
+      const std::string_view argument(argv[index]);
+      if (argument == "--json")
+        jsonOutput = true;
+      else if (argument == "--verbose")
+        verbose = true;
+      else
+        options.push_back(argument);
+    }
+    for (size_t argument = 0; argument < options.size(); argument += 2) {
+      if (argument + 1 >= options.size())
         throw std::invalid_argument("benchmark option requires a value");
-      const std::string_view option(argv[index]);
+      const std::string_view option = options[argument];
       if (option == "--samples") {
-        samples = parseSamples(argv[index + 1]);
+        samples = parseSamples(options[argument + 1]);
       } else if (option == "--progress") {
-        progressPath = std::filesystem::path(argv[index + 1]);
+        progressPath = std::filesystem::path(options[argument + 1]);
       } else if (option == "--scenario") {
-        selected = parseScenarios(argv[index + 1]);
+        selected = parseScenarios(options[argument + 1]);
       } else if (option == "--ane-ffn-share") {
-        aneFfnShare = parseAneFfnShare(argv[index + 1]);
+        aneFfnShare = parseAneFfnShare(options[argument + 1]);
       } else if (option == "--ane-calibration") {
-        if (std::string_view(argv[index + 1]) != "again")
+        if (std::string_view(options[argument + 1]) != "again")
           throw std::invalid_argument("--ane-calibration takes again");
         recalibrateAne = true;
       } else if (option == "--ane-ffn-minimum-rows") {
-        aneFfnMinimumRows = parseAneFfnMinimumRows(argv[index + 1]);
+        aneFfnMinimumRows = parseAneFfnMinimumRows(options[argument + 1]);
       } else if (option == "--ane-moe-experts") {
-        aneMoeExperts = parseCount(argv[index + 1], "--ane-moe-experts");
+        aneMoeExperts = parseCount(options[argument + 1], "--ane-moe-experts");
       } else if (option == "--ane-moe-capacity") {
-        aneMoeCapacity = parseCount(argv[index + 1], "--ane-moe-capacity");
+        aneMoeCapacity = parseCount(options[argument + 1], "--ane-moe-capacity");
         if (*aneMoeCapacity % ops::AneMoe::kCapacityQuantum)
           throw std::invalid_argument("--ane-moe-capacity takes whole quanta of " +
                                       std::to_string(ops::AneMoe::kCapacityQuantum) + " rows");
       } else if (option == "--max-context") {
-        maxContext = parseMaxContext(argv[index + 1]);
+        maxContext = parseMaxContext(options[argument + 1]);
       } else if (option == "--activations") {
-        int8Activations = parseInt8Activations(argv[index + 1]);
+        int8Activations = parseInt8Activations(options[argument + 1]);
       } else if (option == "--verify-rows") {
-        const std::string_view value(argv[index + 1]);
+        const std::string_view value(options[argument + 1]);
         if (value != "all" && value != "auto")
           throw std::invalid_argument("--verify-rows takes all or auto");
         verifyRows = value == "all" ? model::VerifyRows::All : model::VerifyRows::Auto;
       } else if (option == "--context-lengths") {
-        contextLengths = parseContextLengths(argv[index + 1]);
+        contextLengths = parseContextLengths(options[argument + 1]);
       } else if (option == "--short-idle") {
-        shortIdleSeconds = parseShortIdle(argv[index + 1]);
+        shortIdleSeconds = parseShortIdle(options[argument + 1]);
       } else if (option == "--logits") {
-        logitsDirectory = std::filesystem::path(argv[index + 1]);
+        logitsDirectory = std::filesystem::path(options[argument + 1]);
       } else if (option == "--logits-from") {
-        logitsFrom = std::filesystem::path(argv[index + 1]);
+        logitsFrom = std::filesystem::path(options[argument + 1]);
         logitsOptions = true;
       } else if (option == "--logits-width") {
-        logitsWidth = parseSamples(argv[index + 1]);
+        logitsWidth = parseSamples(options[argument + 1]);
         logitsOptions = true;
         if (logitsWidth > model::ExecutionLimits::maximumBatchWidth)
           throw std::invalid_argument("--logits-width exceeds the batch width");
       } else if (option == "--logits-cache") {
-        const std::string_view value(argv[index + 1]);
+        const std::string_view value(options[argument + 1]);
         if (value != "evict" && value != "keep")
           throw std::invalid_argument("--logits-cache takes evict or keep");
         logitsKeepCache = value == "keep";
@@ -1079,6 +1095,9 @@ int main(int argc, char **argv) {
         throw std::invalid_argument("unknown benchmark option");
       }
     }
+    // The run's JSON goes to stdout only when asked for (--json); nothing else
+    // writes there, so a stream that cannot write is the quiet.
+    if (!jsonOutput) std::cout.setstate(std::ios::failbit);
     if (selected.logits != logitsDirectory.has_value())
       throw std::invalid_argument("the logits scenario and --logits go together");
     if (logitsOptions && !logitsDirectory)
@@ -1303,17 +1322,19 @@ int main(int argc, char **argv) {
     // numbers, which are not known until it finishes.
     bool announced = false;
     const auto record = [&](Measurement measurement) {
-      if (!announced) {
-        std::fprintf(stderr, "\nmeasurements as they come (prefill GPU ms, tokens/s):\n");
-        announced = true;
+      if (verbose) {
+        if (!announced) {
+          std::fprintf(stderr, "\nmeasurements as they come (prefill GPU ms, tokens/s):\n");
+          announced = true;
+        }
+        const double perSecond = measurement.prefillGpuMilliseconds > 0.0
+                                     ? 1000.0 * measurement.promptTokens / measurement.prefillGpuMilliseconds
+                                     : 0.0;
+        std::fprintf(stderr, "  %-20s %7u %9.0f %8.0f  ttft %8.0f  %s\n", measurement.scenario.c_str(),
+                     measurement.promptTokens, measurement.prefillGpuMilliseconds, perSecond,
+                     measurement.ttftMilliseconds, measurement.cacheStatus.c_str());
+        std::fflush(stderr);
       }
-      const double perSecond = measurement.prefillGpuMilliseconds > 0.0
-                                   ? 1000.0 * measurement.promptTokens / measurement.prefillGpuMilliseconds
-                                   : 0.0;
-      std::fprintf(stderr, "  %-20s %7u %9.0f %8.0f  ttft %8.0f  %s\n", measurement.scenario.c_str(),
-                   measurement.promptTokens, measurement.prefillGpuMilliseconds, perSecond,
-                   measurement.ttftMilliseconds, measurement.cacheStatus.c_str());
-      std::fflush(stderr);
       measurements.push_back(std::move(measurement));
     };
     // Lengths the memory plan cannot hold, on a Mac with less memory.
