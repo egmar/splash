@@ -28,6 +28,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <variant>
 #include <vector>
 
 #ifndef SPLASH_BUILD_ID
@@ -384,12 +385,16 @@ private:
   std::shared_ptr<WakeState> wake_ = std::make_shared<WakeState>();
 };
 
-std::vector<uint32_t> prompt(uint32_t length, uint64_t salt) {
+// Ids stay within the target's vocabulary, which the benchmark takes from the
+// model's capabilities; the modulus is Qwen's and Inkling's 200000-wide range,
+// so those families' streams are unchanged, and narrower for a smaller vocabulary.
+std::vector<uint32_t> prompt(uint32_t length, uint64_t salt, uint32_t vocabularySize) {
+  const uint64_t modulus = std::max<uint64_t>(std::min<uint64_t>(200000, vocabularySize - 100), 1);
   std::vector<uint32_t> result(length);
   uint64_t state = salt ^ 0x9e3779b97f4a7c15ULL;
   for (uint32_t &token : result) {
     state = state * 6364136223846793005ULL + 1442695040888963407ULL;
-    token = 100 + static_cast<uint32_t>((state >> 17) % 200000);
+    token = 100 + static_cast<uint32_t>((state >> 17) % modulus);
   }
   return result;
 }
@@ -572,6 +577,9 @@ runDecodeThroughput(engine::Engine &engine, Driver &driver,
     request.maxNewTokens = 64;
     request.sampling.temperature = 0.0F;
     request.sampling.topP = 1.0F;
+    // Lanes must not stop at an end-of-sequence token, or the batch would
+    // thin out before 64 tokens and no longer decode at the requested width.
+    request.flags = RequestIgnoreEndOfSequence;
     request.deadlineMilliseconds =
         milliseconds(began + std::chrono::hours(2));
     requestIds.push_back(request.id);
@@ -1174,14 +1182,37 @@ int main(int argc, char **argv) {
     // This executable characterizes one source identity and checks internal
     // invariants; a source-regression claim requires a separately captured
     // baseline report and an explicit comparison outside this process.
-    constexpr std::array<uint32_t, 39> decodeThroughputPrompt{
+    // The decode throughput prompt, in the tokens of the family's own tokenizer:
+    // the counting request whose greedy answer is a near-certain chain, the
+    // same prompts decode-profile measures. Qwen's is what this benchmark has
+    // always sent, byte for byte; Flint's and Inkling-2-Mini's are theirs, so
+    // every family's ids are in its vocabulary. The hashes are of the
+    // little-endian uint32 id streams.
+    constexpr std::array<uint32_t, 39> kThroughputPromptQwen{
         248045, 846,   198,   2427, 38453, 494,   220,   16,
         11,     4237,  1754,  1324, 321,   1141,  6163,  803,
         383,    264,   491,   1500, 13,    14569, 2980,  488,
         5372,   220,   17,    15,   15,    13,    248046, 198,
         248045, 74455, 198,   248068, 271,  248069, 271};
-    constexpr std::string_view decodeThroughputPromptSha256 =
-        "8c9bac848ac2e727f235beda84f06bac1a9320cc7a014d72da24263d07a3d982";
+    constexpr std::array<uint32_t, 29> kThroughputPromptFlint{
+        150003, 3201, 29915, 497, 220, 16, 11, 3758, 1218, 1067, 299, 869, 5095, 1060, 358,
+        260, 618, 1507, 13, 27110, 2843, 361, 4495, 220, 905, 13,
+        150004, 150006, 150007};
+    constexpr std::array<uint32_t, 30> kThroughputPromptInkling{
+        200000, 200004,
+        2635, 187399, 149920, 220, 16, 11, 152979, 150154, 150107, 149880, 150114, 152692,
+        150231, 149894, 149878, 150046, 150264, 13, 188959, 151319, 149941, 155939, 220, 68058, 13,
+        200010, 200001, 200004};
+    const std::vector<uint32_t> decodeThroughputPrompt =
+        std::holds_alternative<model::Inkling2LoopLayout>(config.model.target) ? std::vector<uint32_t>(kThroughputPromptInkling.begin(), kThroughputPromptInkling.end())
+        : std::holds_alternative<model::FlintLayout>(config.model.target)     ? std::vector<uint32_t>(kThroughputPromptFlint.begin(), kThroughputPromptFlint.end())
+                                                                              : std::vector<uint32_t>(kThroughputPromptQwen.begin(), kThroughputPromptQwen.end());
+    const std::string_view decodeThroughputPromptSha256 =
+        std::holds_alternative<model::Inkling2LoopLayout>(config.model.target)
+            ? "77d1337cca194be386bbfedce5c14a3b1adfec4c80a7eb3f759852fbc9db2733"
+        : std::holds_alternative<model::FlintLayout>(config.model.target)
+            ? "bd56623215396804eeaa96a993294da9c6cfb9f27b65fdc5920742342c7bb280"
+            : "8c9bac848ac2e727f235beda84f06bac1a9320cc7a014d72da24263d07a3d982";
     std::vector<DecodeThroughputMeasurement> decodeThroughput;
     decodeThroughput.reserve(size_t{lanes} * samples);
     uint64_t requestId = 1;
@@ -1252,7 +1283,7 @@ int main(int argc, char **argv) {
         // answer request below produces a real multi-block greedy answer.
         std::vector<uint32_t> cold = prompt(
             length - static_cast<uint32_t>(decodeThroughputPrompt.size()),
-            uint64_t{length} << 32 | sample);
+            uint64_t{length} << 32 | sample, capabilities.vocabularySize);
         cold.insert(cold.end(), decodeThroughputPrompt.begin(),
                     decodeThroughputPrompt.end());
         Measurement coldResult =
@@ -1306,7 +1337,7 @@ int main(int argc, char **argv) {
                             answerResult.outputTokens.begin(),
                             answerResult.outputTokens.end());
         std::vector<uint32_t> turn =
-            prompt(64, (uint64_t{length} << 32 | sample) ^ 0x5a5a5a5aULL);
+            prompt(64, (uint64_t{length} << 32 | sample) ^ 0x5a5a5a5aULL, capabilities.vocabularySize);
         continuation.insert(continuation.end(), turn.begin(), turn.end());
         Measurement continuationResult =
             runRequest(engine, driver, *executor, events, progress.get(),
@@ -1321,7 +1352,7 @@ int main(int argc, char **argv) {
         std::vector<uint32_t> rolling = cold;
         std::vector<uint32_t> suffix =
             prompt(rollingSuffixTokens,
-                   (uint64_t{length} << 32 | sample) ^ 0xa5a5a5a5ULL);
+                   (uint64_t{length} << 32 | sample) ^ 0xa5a5a5a5ULL, capabilities.vocabularySize);
         rolling.insert(rolling.end(), suffix.begin(), suffix.end());
         Measurement rollingResult =
             runRequest(engine, driver, *executor, events, progress.get(),
@@ -1380,9 +1411,9 @@ int main(int argc, char **argv) {
     // Compare against the same prompt evaluated cold, then recreate its 10K
     // prefix so the second evaluation is a real partial state-backed hit.
     if (selected.partial) {
-      std::vector<uint32_t> partialBase = prompt(10000, 0x5041525449414cULL);
+      std::vector<uint32_t> partialBase = prompt(10000, 0x5041525449414cULL, capabilities.vocabularySize);
       std::vector<uint32_t> partialPrompt = partialBase;
-      std::vector<uint32_t> partialSuffix = prompt(4096, 0x535546464958ULL);
+      std::vector<uint32_t> partialSuffix = prompt(4096, 0x535546464958ULL, capabilities.vocabularySize);
       partialPrompt.insert(partialPrompt.end(), partialSuffix.begin(),
                            partialSuffix.end());
       for (uint32_t sample = 0; sample < samples; ++sample) {
@@ -1444,7 +1475,7 @@ int main(int argc, char **argv) {
           skippedLengths.push_back(context);
           continue;
         }
-        const std::vector<uint32_t> seed = prompt(context + 1, uint64_t{context} << 32 | 0x524553554dULL);
+        const std::vector<uint32_t> seed = prompt(context + 1, uint64_t{context} << 32 | 0x524553554dULL, capabilities.vocabularySize);
         evictAllCache(resources->cache());
         const Measurement seeded = runRequest(engine, driver, *executor, events, progress.get(), requestId++,
                                               "resume_seed_" + std::to_string(context), 0, seed);
@@ -1454,7 +1485,7 @@ int main(int argc, char **argv) {
           for (const uint32_t suffix : resumeSuffixes) {
             std::vector<uint32_t> tokens = seed;
             const std::vector<uint32_t> more =
-                prompt(suffix, (uint64_t{suffix} << 40) ^ (uint64_t{sample} << 32) ^ context ^ 0x5355464658ULL);
+                prompt(suffix, (uint64_t{suffix} << 40) ^ (uint64_t{sample} << 32) ^ context ^ 0x5355464658ULL, capabilities.vocabularySize);
             tokens.insert(tokens.end(), more.begin(), more.end());
             Measurement result = runRequest(engine, driver, *executor, events, progress.get(), requestId++,
                                             "resume_" + std::to_string(context) + "_r" + std::to_string(suffix + 1),
@@ -1481,7 +1512,7 @@ int main(int argc, char **argv) {
           std::this_thread::sleep_for(std::chrono::duration<double>(shortIdleSeconds));
           Measurement result = runRequest(
               engine, driver, *executor, events, progress.get(), requestId++, "short", sample,
-              prompt(rows, (uint64_t{rows} << 32 | sample) ^ 0x53484f5254ULL));
+              prompt(rows, (uint64_t{rows} << 32 | sample) ^ 0x53484f5254ULL, capabilities.vocabularySize));
           if (result.cacheStatus != "miss")
             throw std::runtime_error("short prompt of a " + std::to_string(rows) +
                                      "-row chunk was not a cold miss: " + result.cacheStatus);
@@ -1502,7 +1533,7 @@ int main(int argc, char **argv) {
       for (uint32_t sample = 0; sample < samples; ++sample) {
         for (uint32_t index = 0; index < transcriptCases.size(); ++index) {
           const auto [request, context] = transcriptCases[index];
-          std::vector<uint32_t> tokens = prompt(context, uint64_t{index} << 32 | 0x5452414e53ULL);
+          std::vector<uint32_t> tokens = prompt(context, uint64_t{index} << 32 | 0x5452414e53ULL, capabilities.vocabularySize);
           const std::span<const uint32_t> question = benchmark::kTranscriptPrompts[request];
           tokens.insert(tokens.end(), question.begin(), question.end());
           evictAllCache(resources->cache());
@@ -1592,10 +1623,10 @@ int main(int argc, char **argv) {
     // diverge. State eviction deliberately leaves the Page32 graph intact.
     if (selected.context) {
       evictAllCache(resources->cache());
-      const std::vector<uint32_t> lazyShared = prompt(7168, 0x4c415a594b56ULL);
+      const std::vector<uint32_t> lazyShared = prompt(7168, 0x4c415a594b56ULL, capabilities.vocabularySize);
       const auto lazyBranch = [&](uint64_t salt) {
         std::vector<uint32_t> branch = lazyShared;
-        const std::vector<uint32_t> tail = prompt(2048, salt);
+        const std::vector<uint32_t> tail = prompt(2048, salt, capabilities.vocabularySize);
         branch.insert(branch.end(), tail.begin(), tail.end());
         return branch;
       };
